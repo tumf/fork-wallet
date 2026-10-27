@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>fork-wallet legacy API fixture</title>
+</head>
+<body>
+  <!-- Synthetic legacy API fixture for test/legacy-compat.test.js. Not web3modal, not Uniswapper, not a third-party app. -->
+  <h1>fork-wallet legacy API fixture</h1>
+  <button id="connect">Connect (enable)</button>
+  <label>From <input id="from" size="44"></label>
+  <label>To <input id="to" size="44"></label>
+  <label>Value (wei, hex) <input id="value" value="0x0"></label>
+  <button id="send">Send</button>
+  <p>Status: <span id="status">idle</span></p>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
