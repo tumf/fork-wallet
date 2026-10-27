@@ -472,6 +472,7 @@ async function installForkWallet(context, options) {
   let connected = true;
   let authorized = false;
   let epoch = 0;
+  let lastScopeChange = null; // { code, message } of the most recent bumpEpoch
   let outstanding = null;
 
   const activeAccount = () => accounts.get(active.chainId);
@@ -493,6 +494,7 @@ async function installForkWallet(context, options) {
    */
   function bumpEpoch(code, message, except = null) {
     epoch++;
+    lastScopeChange = { code, message };
     const record = outstanding;
     if (!record || record === except || !['admitted', 'held'].includes(record.outcome)) return;
     record.outcome = 'cancelled';
@@ -594,8 +596,14 @@ async function installForkWallet(context, options) {
     const inputHash = crypto.createHash('sha256').update(JSON.stringify(params[0])).digest('hex');
     const admittedEpoch = epoch;
     try { await validateTransaction(tx); } catch (error) { fail(CODES.INTERNAL, `transaction refused by policy: ${messageOf(error)}`); }
-    if (epoch !== admittedEpoch || !authorized) fail(CODES.UNAUTHORIZED, 'authorization changed during policy check');
+    // A scope change during the policy check fails with its own cause: 4900 disconnect, 4901 chain switch, 4100 otherwise.
     if (!connected) fail(CODES.DISCONNECTED, 'wallet disconnected');
+    if (!authorized) fail(CODES.UNAUTHORIZED, 'authorization changed during policy check');
+    if (epoch !== admittedEpoch) {
+      const { code, message } = lastScopeChange;
+      if (code === CODES.DISCONNECTED || code === CODES.CHAIN_DISCONNECTED) fail(code, message);
+      fail(CODES.UNAUTHORIZED, 'authorization changed during policy check');
+    }
     return runApproval('eth_sendTransaction', { transaction: tx, inputHash }, async (record, decision) => {
       const chain = registry.get(record.chainId);
       await preflight(chain, record.account);

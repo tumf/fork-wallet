@@ -212,6 +212,21 @@ test('epochs: late policy, preflight and pre-admission races never dispatch; dis
   assert.equal(code(await early), CODES.UNAUTHORIZED);
   assert.equal(ctxA.w.calls.length, admittedBefore, 'not admitted');
   assert.equal(ctxA.node.sends, 0);
+  // Pre-admission disconnect and chain-switch races fail with their own cause (4900 / 4901), never 4100.
+  await ctxA.ctx.request('eth_requestAccounts');
+  for (const [race, expected] of [[() => ctxA.w.disconnect(), CODES.DISCONNECTED], [() => ctxA.w.switchChain(chain2), CODES.CHAIN_DISCONNECTED]]) {
+    validations = 0;
+    gate = { at: 1, ...deferred() };
+    const before = ctxA.w.calls.length;
+    const pending = ctxA.ctx.request('eth_sendTransaction', [txFor()]);
+    while (validations < 1) await tick(1);
+    await race();
+    gate.resolve();
+    assert.equal(code(await pending), expected);
+    assert.equal(ctxA.w.calls.length, before, 'not admitted');
+    assert.equal(ctxA.node.sends + ctxA.node2.sends, 0);
+    await ctxA.w.reconnect();
+  }
   // (c) Preflight race: a Node-side chain switch while the ownership guard is pending.
   let guardGate = null;
   const ctxC = await setup(t, { beforeSend: async () => { if (guardGate) { const g = guardGate; guardGate = null; await g.promise; } } });

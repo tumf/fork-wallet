@@ -25,6 +25,9 @@ try {
   assert.equal(manifest.private, true);
   assert.equal(manifest.license, 'UNLICENSED');
   assert.equal(manifest.dependencies, undefined, 'zero runtime dependencies');
+  const lock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
+  assert.equal(lock.version, manifest.version, 'lockfile root version matches package.json');
+  assert.equal(lock.packages[''].version, manifest.version, 'lockfile packages[""] version matches package.json');
   for (const file of ['src/index.js', 'src/anvil.js', 'index.d.ts', 'anvil.d.ts']) {
     const text = fs.readFileSync(path.join(ROOT, file), 'utf8');
     assert.ok(!/\/Users\/|\/home\//.test(text), `no absolute paths in ${file}`);
