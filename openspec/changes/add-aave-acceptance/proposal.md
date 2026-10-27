@@ -21,7 +21,7 @@ verifications:
     trigger: pull-request-validation
     automation: package.json
     evidence: Real fresh fork UI receipts events independent balance reads and verified cleanup; no mocks or skipped steps
-    rerun: env -i PATH=/opt/homebrew/opt/node@24/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin HOME=$HOME SPIKE_RUNNER=conflux node examples/aave/harness.js
+    rerun: env -i PATH=/opt/homebrew/opt/node@24/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin HOME=$HOME SPIKE_RUNNER=conflux node examples/aave/gate.js
     prerequisites: [macOS sandbox-exec, Anvil 1.8.3, Playwright Chromium, pinned Aave checkout with installed lockfile dependencies, public Base read RPC]
     execution_class: repository-local
     completion_role: change-blocking

@@ -313,6 +313,45 @@ check('outcome: prerequisite fatal = exit 3; acceptance-stage fatal, other failu
   assert.deepEqual(L.EXIT, { PASS: 0, FAILED: 2, BLOCKED: 3, DEGRADED: 4 });
 });
 
+// 10b. Supervised gate (gate.js): exit 4 is accepted only after inspecting the evidence; never a clean PASS.
+const gateEvidence = (diag = [st('diag.gateway.cold', 'diagnostic-timeout'), st('diag.gateway.afterWarm', 'passed')], over = {}) => {
+  const steps = [...diag, ...passedRuntime()];
+  const e = { steps, fatal: null, close: cleanClose(), launched: allLaunched, redactionSentinel: { longHexRedacted: 0 }, aavePinned: L.PINNED_AAVE_COMMIT, aaveTrackedClean: true, ...over };
+  e.cleanup = L.cleanupVerdict(e.close, e.launched);
+  e.acceptance = L.classifyAcceptance({ steps: e.steps, fatal: e.fatal, cleanup: e.cleanup, sentinelHits: e.redactionSentinel.longHexRedacted });
+  return e;
+};
+check('gate: inspected exit 4 = gate exit 0 DEGRADED-ACCEPTED (not PASS); exit 0 = PASS', () => {
+  const g = L.gateVerdict({ harnessExit: 4, evidence: gateEvidence() });
+  assert.equal(g.exitCode, 0, JSON.stringify(g.reasons)); assert.equal(g.verdict, 'DEGRADED-ACCEPTED');
+  assert.deepEqual(g.degradedDiagnostics, [{ name: 'diag.gateway.cold', status: 'diagnostic-timeout' }]);
+  const p = L.gateVerdict({ harnessExit: 0, evidence: gateEvidence(healthyDiag) });
+  assert.equal(p.exitCode, 0, JSON.stringify(p.reasons)); assert.equal(p.verdict, 'PASS');
+});
+check('gate: exit 2/3/other propagate; missing evidence or any inspection mismatch = exit 2', () => {
+  for (const code of [2, 3, 1, 137]) assert.equal(L.gateVerdict({ harnessExit: code, evidence: gateEvidence() }).exitCode, code);
+  assert.equal(L.gateVerdict({ harnessExit: null, evidence: gateEvidence() }).exitCode, 2);
+  assert.equal(L.gateVerdict({ harnessExit: 4, evidence: null }).exitCode, 2);
+  assert.equal(L.gateVerdict({ harnessExit: 0, evidence: gateEvidence() }).exitCode, 2); // degraded evidence cannot claim PASS
+  assert.equal(L.gateVerdict({ harnessExit: 4, evidence: gateEvidence(healthyDiag) }).exitCode, 2); // exit/evidence disagree
+  const tampered = (mut) => { const e = gateEvidence(); mut(e); return L.gateVerdict({ harnessExit: 4, evidence: e }); };
+  // the recorded summary is not trusted: each raw-evidence defect is caught by re-derivation
+  assert.equal(tampered((e) => { e.steps = e.steps.filter((s) => s.name !== 'ui.withdraw.WETH'); }).exitCode, 2);
+  assert.equal(tampered((e) => { e.steps = e.steps.map((s) => (s.name === 'ui.supply.ETH' ? st(s.name, 'failed') : s)); }).exitCode, 2);
+  assert.equal(tampered((e) => { e.steps = e.steps.filter((s) => s.name !== 'ui.withdraw.ETH.native-refusal'); }).exitCode, 2);
+  assert.equal(tampered((e) => { e.close = { ...e.close, anvilListenerAfter: [77] }; }).exitCode, 2);
+  assert.equal(tampered((e) => { e.close = { ...e.close, aaveTrackedCleanAfter: ['M src/x.ts'] }; }).exitCode, 2);
+  assert.equal(tampered((e) => { e.cleanup = { ok: false, reasons: ['x'] }; }).exitCode, 2);
+  assert.equal(tampered((e) => { e.redactionSentinel = { longHexRedacted: 1 }; }).exitCode, 2);
+  assert.equal(tampered((e) => { delete e.redactionSentinel; }).exitCode, 2);
+  assert.equal(tampered((e) => { e.fatal = { stage: 'acceptance', step: 'ui.load' }; }).exitCode, 2);
+  assert.equal(tampered((e) => { e.aavePinned = 'f'.repeat(40); }).exitCode, 2);
+  assert.equal(tampered((e) => { e.aaveTrackedClean = false; }).exitCode, 2);
+  assert.equal(tampered((e) => { e.acceptance = { ...e.acceptance, overall: 'PASS' }; }).exitCode, 2);
+  assert.equal(tampered((e) => { e.acceptance = { ...e.acceptance, nativeRouteCapability: 'passed' }; }).exitCode, 2);
+  assert.equal(tampered((e) => { delete e.acceptance; }).exitCode, 2);
+});
+
 // 11. Pin, runner metadata and redaction sentinels.
 check('pin: only the pinned commit with no tracked modification passes', () => {
   assert.equal(L.PINNED_AAVE_COMMIT, '20fdc895a9e3925960b5cd111fe09535cf224085');

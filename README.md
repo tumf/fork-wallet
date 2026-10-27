@@ -375,7 +375,7 @@ test runner) are served without CORS headers.
 | `npm run test:pack` | `npm pack`, install into a throwaway consumer outside the repo, load `fork-wallet` and `fork-wallet/anvil` from CJS and ESM, check that private paths are not exported, that there are no runtime dependencies and that signing is default-disabled and opt-in through the installed exports. | Node, npm |
 
 | `npm run test:aave:logic` | Example only (`examples/aave/selfcheck.js`): Aave acceptance policy/receipt logic, outcome and exit-status matrix, redaction/runner/pin sentinels and a real local redirect-denial control in headless Chromium (loopback only). | Node, Playwright Chromium, pinned Aave checkout (`AAVE_DIR`) |
-| `npm run test:aave` | Example only (`examples/aave/harness.js`): unchanged pinned Aave UI supplies ETH and withdraws WETH on an owned Base fork; exit 0 PASS, 4 DEGRADED, 2 FAILED, 3 BLOCKED. See [examples/aave/README.md](examples/aave/README.md). | macOS `sandbox-exec`, Anvil 1.8.3, Playwright Chromium, pinned Aave checkout, public Base read RPC |
+| `npm run test:aave` | Example only (`examples/aave/gate.js` around `examples/aave/harness.js`): unchanged pinned Aave UI supplies ETH and withdraws WETH on an owned Base fork. The harness exits 0 PASS, 4 DEGRADED, 2 FAILED or 3 BLOCKED. The gate turns 4 into exit 0 (`DEGRADED-ACCEPTED`, not a clean PASS) only after inspecting the evidence; 2/3 propagate. See [examples/aave/README.md](examples/aave/README.md). | macOS `sandbox-exec`, Anvil 1.8.3, Playwright Chromium, pinned Aave checkout, public Base read RPC |
 
 Missing tools are failures, never skips. Apart from `npm run test:aave` (its Anvil fork and one `eth_blockNumber` read
 `https://mainnet.base.org`), no test contacts anything beyond 127.0.0.1.

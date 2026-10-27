@@ -27,7 +27,9 @@ is in git history only. Evidence never names an author or a model: the current e
   It also runs a real local **redirect-denial control** in headless Chromium through the same route handler: owned
   ephemeral loopback servers only, no public calls. A missing Chromium is a FAIL, not a skip. It recomputes every
   selector/topic with ethers from the Aave checkout and checks the upstream withdraw-route sources.
-- `harness.js` — `npm run test:aave`: the end-to-end run. Writes only `artifacts/<timestamp>/` (gitignored).
+- `harness.js` — `npm run test:aave:harness`: the end-to-end run. Writes only `artifacts/<timestamp>/` (gitignored).
+- `gate.js` — `npm run test:aave`: the supervised acceptance gate. Runs `harness.js` once and inspects its
+  `evidence.json` (`lib.js` `gateVerdict`), writing `gate-verdict.json` next to it. See [Supervised gate](#supervised-gate-gatejs).
 
 ## Prerequisites (not fetched or installed by the harness)
 
@@ -55,7 +57,8 @@ is in git history only. Evidence never names an author or a model: the current e
 ```sh
 npm run test:aave:logic
 /usr/bin/env -i PATH=/opt/homebrew/opt/node@24/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin HOME="$HOME" \
-  SPIKE_RUNNER=<who-runs-this> node examples/aave/harness.js        # or: npm run test:aave (same script)
+  SPIKE_RUNNER=<who-runs-this> node examples/aave/gate.js           # or: npm run test:aave (same script)
+# raw harness exit status without the gate: node examples/aave/harness.js (npm run test:aave:harness)
 ```
 
 The harness refuses credential-like environment variables. A full run takes about 3–4 minutes, mostly the cold-read
@@ -75,6 +78,23 @@ duplicated or skipped step never yields 0 or 4. If the native refusal check is n
 the budget or a failed WETH route), it is `blocked`, which fails acceptance. `nativeRouteCapability` is always
 `blocked`: the refusal check proves the block and does not provide native withdrawal. Diagnostics keep their error
 class and timing (`evidence.diagnostics`, `diag.*` steps).
+
+## Supervised gate (`gate.js`)
+
+A supervisor that only sees exit codes would read the harness's exit 4 as a failure. `gate.js` performs the evidence
+inspection that exit 4 requires, so the declared verification runs the gate, not the raw harness. It derives the outcome
+again from the raw evidence (`steps`, `fatal`, `close` + `launched` through `cleanupVerdict`, redaction sentinel) and
+does not trust `evidence.acceptance`. It requires that the derived outcome, the recorded outcome and the harness exit
+code agree. It also requires that `supply`, `withdrawWETH` and `nativeRouteRefusal` passed, that cleanup was verified,
+that the Aave checkout was pinned and tracked-clean before and after the run, and that `nativeRouteCapability` is
+`blocked`.
+
+| Harness exit | Gate verdict | Gate exit |
+| --- | --- | --- |
+| 0 and inspection holds | `PASS` | 0 |
+| 4 and inspection holds | `DEGRADED-ACCEPTED`: degraded success of the warm path, **not** a clean PASS. The degraded diagnostics are listed. | 0 |
+| 0/4 and any inspection mismatch, missing or unreadable evidence | `NOT-ACCEPTED` | 2 |
+| 2, 3 or anything else | `NOT-ACCEPTED` | unchanged (2/3 can never complete the change) |
 
 ## What `harness.js` does
 

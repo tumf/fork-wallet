@@ -442,6 +442,46 @@ function classifyAcceptance({ steps, fatal, cleanup, sentinelHits = 0 }) {
 }
 
 /**
+ * Supervised-gate verdict over one harness run (gate.js). Exit 4 is DEGRADED, never a clean PASS; the gate may accept
+ * it only after inspecting the evidence. The inspection re-derives the outcome from the raw evidence (steps, fatal,
+ * close + launched -> cleanupVerdict, redaction sentinel) instead of trusting the harness summary, and requires: the
+ * re-derived and recorded outcomes agree with the harness exit code, supply/withdrawWETH/nativeRouteRefusal passed,
+ * cleanup verified with the Aave checkout pinned and tracked-clean before and after. Then 0 -> PASS, 4 -> exit 0 as
+ * DEGRADED-ACCEPTED (diagnostics listed). Exit 2/3/other propagate unchanged; any inspection failure is exit 2.
+ */
+function gateVerdict({ harnessExit, evidence }) {
+  if (harnessExit !== EXIT.PASS && harnessExit !== EXIT.DEGRADED) {
+    return { verdict: 'NOT-ACCEPTED', exitCode: Number.isInteger(harnessExit) && harnessExit !== 0 ? harnessExit : EXIT.FAILED, harnessExit, reasons: [`harness exit ${harnessExit}`] };
+  }
+  const reasons = [];
+  const e = evidence && typeof evidence === 'object' ? evidence : null;
+  if (!e) reasons.push('evidence missing or unreadable');
+  const recorded = e && e.acceptance && typeof e.acceptance === 'object' ? e.acceptance : null;
+  if (e && !recorded) reasons.push('evidence.acceptance missing');
+  let derived = null;
+  if (e) {
+    const cleanup = cleanupVerdict(e.close, e.launched);
+    const hits = e.redactionSentinel && Number.isInteger(e.redactionSentinel.longHexRedacted) ? e.redactionSentinel.longHexRedacted : 1;
+    derived = classifyAcceptance({ steps: e.steps, fatal: e.fatal, cleanup, sentinelHits: hits });
+    if (derived.exitCode !== harnessExit) reasons.push(`re-derived outcome ${derived.overall} (exit ${derived.exitCode}) != harness exit ${harnessExit}`);
+    for (const k of Object.keys(RUNTIME_CHECKS)) if (derived[k] !== 'passed') reasons.push(`${k} ${derived[k]}`);
+    if (derived.cleanup !== 'passed') reasons.push(`cleanup not verified: ${cleanup.reasons.join('; ')}`);
+    if (!e.cleanup || e.cleanup.ok !== true) reasons.push('recorded cleanup verdict not ok');
+    if (!e.launched || e.launched.aave !== true) reasons.push('Aave checkout not launched');
+    if (e.aavePinned !== PINNED_AAVE_COMMIT) reasons.push('Aave checkout not the pinned commit');
+    if (e.aaveTrackedClean !== true) reasons.push('Aave checkout not tracked-clean before the run');
+  }
+  if (recorded) {
+    if (recorded.exitCode !== harnessExit) reasons.push(`recorded exit ${recorded.exitCode} != harness exit ${harnessExit}`);
+    if (derived && recorded.overall !== derived.overall) reasons.push(`recorded overall ${recorded.overall} != re-derived ${derived.overall}`);
+    if (recorded.nativeRouteCapability !== 'blocked') reasons.push('native route capability must stay blocked');
+  }
+  if (reasons.length) return { verdict: 'NOT-ACCEPTED', exitCode: EXIT.FAILED, harnessExit, reasons };
+  if (harnessExit === EXIT.PASS) return { verdict: 'PASS', exitCode: 0, harnessExit, reasons };
+  return { verdict: 'DEGRADED-ACCEPTED', exitCode: 0, harnessExit, reasons, degradedDiagnostics: derived.diagnostics.filter((d) => d.status !== 'passed') };
+}
+
+/**
  * Next hop of a redirect the egress proxy received, or null when it is not a usable redirect. Fetch semantics: 303,
  * and 301/302 after POST, continue as GET without a body; 307/308 keep method and body.
  */
@@ -517,5 +557,5 @@ module.exports = {
   makePolicy, expectedPoolWithdrawCall, hmrSocketAllowed, verifyMarketText, shortAddressRegex, assertSupply, assertWithdraw, withdrawGate,
   unexpectedNavigations, classifyRpcError, summarizeRpcItem,
   PINNED_AAVE_COMMIT, checkAavePin, redact, scrubEvidenceText, runnerMetadata, diagnosticStatus, RUNTIME_CHECKS, EXIT,
-  cleanupVerdict, classifyAcceptance, makeEgressHandler, redirectHop, MAX_REDIRECT_HOPS, positiveRouteHygiene, assertNativeRefusal,
+  cleanupVerdict, classifyAcceptance, gateVerdict, makeEgressHandler, redirectHop, MAX_REDIRECT_HOPS, positiveRouteHygiene, assertNativeRefusal,
 };

@@ -34,7 +34,8 @@
     "test:all": "npm test && npm run test:sdk",
     "test:pack": "node test/pack-consumer.js",
     "test:aave:logic": "node examples/aave/selfcheck.js",
-    "test:aave": "node examples/aave/harness.js"
+    "test:aave": "node examples/aave/gate.js",
+    "test:aave:harness": "node examples/aave/harness.js"
   },
   "peerDependencies": {
     "playwright": ">=1.40"
