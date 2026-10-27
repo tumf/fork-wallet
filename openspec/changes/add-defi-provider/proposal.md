@@ -64,5 +64,8 @@ All active task gates execute with nonzero counts, no skips and no external netw
 ## Out of Scope / Remaining Design Work
 This is stage one, NOT completion of general DeFi support. A separate dependent signing change will cover personal_sign/EIP-712 with fresh keys. Mainnet/Polygon protocol fork acceptance, Permit2, independent existing dApp, OS-level egress sandbox, macOS+Linux portability certification, live SIWE/backend and P-256 migration remain later acceptance/deliveries; do not advertise them. No signature generation in this change, no all-public-site compatibility. Local vanilla fixture success is never a fork or arbitrary dApp PASS.
 
+## Reference precedence
+roadmap.md is historical design reference only, NOT an implementation contract. This proposal/design/tasks/spec delta take precedence; future signing/fork instructions and the old execution directives in roadmap.md are not executable tasks here.
+
 ## Rejected Alternatives
 A generic Synpress wrapper adds dependency/browser framework coupling and does not replace this package's mandatory ownership and exact policy gates. Reuse EVM/SDK implementations, not a second wallet UI. No broad RPC passthrough, fake receipts, implicit MetaMask flags or compatibility bypass for old preauthorized semantics.
