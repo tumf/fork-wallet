@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>fork-wallet example dApp</title>
+</head>
+<body data-connected="false">
+  <h1>fork-wallet example dApp</h1>
+  <p>A generic native-transfer page that only uses <code>window.ethereum</code>. No framework, no RPC of its own.</p>
+  <button id="connect">Connect wallet</button>
+  <dl>
+    <dt>Account</dt><dd id="account">-</dd>
+    <dt>Chain</dt><dd id="chain">-</dd>
+  </dl>
+  <form id="transfer">
+    <label>To <input id="to" name="to" size="44" required></label>
+    <label>Value (wei, hex) <input id="value" name="value" value="0x0" required></label>
+    <button id="send" type="submit" disabled>Send</button>
+  </form>
+  <p>Status: <span id="status">idle</span></p>
+  <p>Last hash: <span id="hash">-</span></p>
+  <ol id="events"></ol>
+  <script src="app.js"></script>
+</body>
+</html>
