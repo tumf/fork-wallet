@@ -4,13 +4,17 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
-const { requireOwnedPort } = require('../../src/anvil.js');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DEFAULT_CSP = "default-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'";
 
-/** Serves only the files directly in one directory on a free loopback port with an explicit CSP (self-only by default). */
-async function startStaticServer(root, { csp = DEFAULT_CSP } = {}) {
+/**
+ * Serves only the files directly in one directory on a free loopback port with an explicit CSP (self-only by default).
+ * `requireOwnedPort` may be injected (the installed-package gate passes the installed fork-wallet/anvil export); the
+ * repository source helper is loaded lazily only when it is absent.
+ */
+async function startStaticServer(root, { csp = DEFAULT_CSP, requireOwnedPort } = {}) {
+  const ownedPort = requireOwnedPort || require('../../src/anvil.js').requireOwnedPort;
   const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
   const server = http.createServer((req, res) => {
     const name = req.url === '/' ? 'index.html' : req.url.slice(1);
@@ -24,7 +28,7 @@ async function startStaticServer(root, { csp = DEFAULT_CSP } = {}) {
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
-  requireOwnedPort(process.pid, port);
+  ownedPort(process.pid, port);
   return {
     origin: `http://127.0.0.1:${port}`, port,
     close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); }),

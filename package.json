@@ -34,6 +34,7 @@
     "test:integration": "node test/run-gate.js test/integration.test.js",
     "test:all": "npm test && npm run test:sdk",
     "test:pack": "node test/pack-consumer.js",
+    "test:pack:runtime": "node test/pack-consumer.js --runtime",
     "test:aave:logic": "node examples/aave/selfcheck.js",
     "test:aave": "node examples/aave/gate.js",
     "test:aave:harness": "node examples/aave/harness.js"

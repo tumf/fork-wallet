@@ -3,26 +3,40 @@
 // network fork) and the generic dApp in examples/local-anvil/dapp, migrated to 0.2.0 semantics (explicit connect
 // approval, ID-bound release, revoke vs disconnect, reconnect). Native transfers are really submitted and checked by
 // receipt, balance and nonce. Requirements: Anvil 1.8.3, Playwright Chromium, lsof. Missing tools fail.
+// Installed mode (`npm run test:pack:runtime` only): FORK_WALLET_CONSUMER_DIR selects the installed fork-wallet and
+// fork-wallet/anvil exports of that external consumer (no source fallback) and FORK_WALLET_EVIDENCE_DIR is the output.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { chromium } = require('playwright');
-const { installForkWallet, createLoopbackRpc, CODES } = require('../src/index.js');
-const { startAnvil, requireOwnedPort } = require('../src/anvil.js');
+const { selectInstalled, loadedSourceModules } = require('./installed-exports.js');
+
+const CONSUMER_DIR = process.env.FORK_WALLET_CONSUMER_DIR;
+const installed = CONSUMER_DIR === undefined ? null : selectInstalled(CONSUMER_DIR);
+if (installed && !path.isAbsolute(process.env.FORK_WALLET_EVIDENCE_DIR || '')) throw new Error('installed mode requires an absolute FORK_WALLET_EVIDENCE_DIR');
+const { installForkWallet, createLoopbackRpc, CODES } = require(installed ? installed.index : '../src/index.js');
+const { startAnvil, requireOwnedPort } = require(installed ? installed.anvil : '../src/anvil.js');
 const harness = require('../examples/local-anvil/harness.js');
 
 const DAPP = path.join(__dirname, '../examples/local-anvil/dapp');
-const OUT = path.join(__dirname, '../artifacts/local-anvil', new Date().toISOString().replace(/[:.]/g, '-'));
+const OUT = installed ? process.env.FORK_WALLET_EVIDENCE_DIR : path.join(__dirname, '../artifacts/local-anvil', new Date().toISOString().replace(/[:.]/g, '-'));
 const ONE_ETHER = 10n ** 18n;
 const hex = (value) => '0x' + value.toString(16);
 const digest = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
 test('generic dApp on vanilla Anvil: connect approval, approve, reject, hold/cancel/release, lost, revoke, disconnect, reconnect', async (t) => {
   const evidence = { scope: 'Vanilla local Anvil (no network fork) + Playwright Chromium + loopback static dApp. Adapter proof only, not a production wallet.',
-    result: 'UNKNOWN', steps: [], sources: Object.fromEntries(['src/index.js', 'src/anvil.js', 'examples/local-anvil/harness.js', 'examples/local-anvil/dapp/index.html',
-      'examples/local-anvil/dapp/app.js', 'test/integration.test.js'].map((p) => [p, digest(path.join(__dirname, '..', p))])) };
+    result: 'UNKNOWN', steps: [], sources: Object.fromEntries([...(installed ? [] : ['src/index.js', 'src/anvil.js']), 'examples/local-anvil/harness.js', 'examples/local-anvil/dapp/index.html',
+      'examples/local-anvil/dapp/app.js', 'test/integration.test.js', 'test/installed-exports.js'].map((p) => [p, digest(path.join(__dirname, '..', p))])) };
+  if (installed) {
+    // Production code comes only from the installed package; the parent gate re-checks these realpaths.
+    evidence.installed = { ...installed, requireOwnedPortSupplier: installed.anvil,
+      digests: { [installed.index]: digest(installed.index), [installed.anvil]: digest(installed.anvil) },
+      version: JSON.parse(fs.readFileSync(path.join(installed.packageDir, 'package.json'), 'utf8')).version };
+    assert.equal(require.cache[installed.anvil].exports.requireOwnedPort, requireOwnedPort, 'requireOwnedPort comes from the installed anvil export');
+  }
   fs.mkdirSync(OUT, { recursive: true });
   const write = () => fs.writeFileSync(path.join(OUT, 'evidence.json'), JSON.stringify(evidence, (k, v) => (typeof v === 'bigint' ? v.toString() : v), 2) + '\n');
   let anvil, server, browser;
@@ -33,9 +47,12 @@ test('generic dApp on vanilla Anvil: connect approval, approve, reject, hold/can
     try { if (anvil) await anvil.stop(); } catch (error) { stopped = false; evidence.stopError = error.message; }
     evidence.childrenStopped = stopped;
     if (!stopped) evidence.result = 'FAIL';
+    evidence.sourceModulesLoaded = loadedSourceModules();
+    if (installed && evidence.sourceModulesLoaded.length) evidence.result = 'FAIL';
     write();
     console.log(evidence.result + ': ' + path.join(OUT, 'evidence.json'));
     assert.equal(stopped, true, 'owned anvil did not stop');
+    if (installed) assert.deepEqual(evidence.sourceModulesLoaded, [], 'repository production source was loaded in installed mode');
   });
   const step = (name, data) => { evidence.steps.push({ name, ...data }); };
 
@@ -46,7 +63,7 @@ test('generic dApp on vanilla Anvil: connect approval, approve, reject, hold/can
   assert.equal(await rpc('eth_getBalance', [recipient, 'latest']), '0x0');
   evidence.chain = { version: await rpc('web3_clientVersion'), chainId: anvil.chainId, endpoint, account, recipient, anvilPid: anvil.pid };
 
-  server = await harness.startStaticServer(DAPP);
+  server = await harness.startStaticServer(DAPP, { requireOwnedPort });
   const { origin } = server;
   evidence.dapp = { origin, serverPid: process.pid };
 
