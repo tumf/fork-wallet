@@ -8,7 +8,7 @@ verifications:
     phase: pre-integration
     owner: conflux-acceptance
     trigger: pull-request-validation
-    automation: examples/aave/selfcheck.js
+    automation: package.json
     evidence: node examples/aave/selfcheck.js; nonzero tests with positive and negative coverage
     rerun: node examples/aave/selfcheck.js
     prerequisites: [Node >=22]
@@ -19,7 +19,7 @@ verifications:
     phase: pre-integration
     owner: conflux-acceptance
     trigger: pull-request-validation
-    automation: examples/aave/harness.js
+    automation: package.json
     evidence: Real fresh fork UI receipts events independent balance reads and verified cleanup; no mocks or skipped steps
     rerun: env -i PATH=/opt/homebrew/opt/node@24/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin HOME=$HOME SPIKE_RUNNER=conflux node examples/aave/harness.js
     prerequisites: [macOS sandbox-exec, Anvil 1.8.3, Playwright Chromium, pinned Aave checkout with installed lockfile dependencies, public Base read RPC]
@@ -39,12 +39,14 @@ verifications:
 ---
 # Add measured Aave acceptance example
 
+**Change Type**: implementation
+
 ## Context and fixed inputs
 fork-wallet main 2e53ea8 (0.3.0). Exploratory work preserved on branch spike-aave-acceptance commit eb01565 under spike/aave; use git show to read these exact files, not a moving worktree. The spike itself is NOT merged. Parent measured unchanged Aave interface 20fdc895a9e3925960b5cd111fe09535cf224085: UI supplies 0.5 ETH, withdraws 0.1 WETH (Unwrap OFF), native ETH route demands unlimited aWETH approve and is refused with zero sends. Evidence absolute path $HOME/work2/spike-aave-acceptance/spike/aave/artifacts/2026-10-27T12-25-23-366Z/evidence.json. Overall exit2 due to direct cold-read diagnostic exceeding60s, despite warm UI success. Do not call prior run overall PASS.
 Fable 5.1 independent review job 0f1f3c29697b79d607d76e2437aa28cc confirmed actual transaction evidence and conditional acceptance, requiring diagnostic separation, no auto redirects, truthful runner metadata. Review log $HOME/.local/share/agent-exec/jobs/0f1f3c29697b79d607d76e2437aa28cc/stdout.log.
 
 ## Solution / changes allowed
-Promote ONLY the reviewed guarded example to examples/aave/{harness.js,lib.js,selfcheck.js,README.md,.gitignore}; adjust relative product imports as needed. Use the committed spike as seed, not a new architecture. Add short README/ACCEPTANCE links and canonical OpenSpec delta. No product src/types/package version/dependency/API/timeout changes. Retain private/UNLICENSED, signing disabled, capped approvals and owned disposable local chain31337. Do not merge the entire spike branch, import historical artifacts or retain dead alternative runtime paths beyond useful negative checks.
+Promote ONLY the reviewed guarded example to examples/aave/{harness.js,lib.js,selfcheck.js,README.md,.gitignore}; adjust relative product imports as needed. Use the committed spike as seed, not a new architecture. Add short README/ACCEPTANCE links and canonical OpenSpec delta. Add package scripts test:aave:logic and test:aave invoking the new selfcheck/harness; metadata automation package.json uses those scripts once implemented. No product src/types/package version/dependency/API/timeout changes. Retain private/UNLICENSED, signing disabled, capped approvals and owned disposable local chain31337. Do not merge the entire spike branch, import historical artifacts or retain dead alternative runtime paths beyond useful negative checks.
 
 ## Exact corrections
 - Classify all diag.* failures independently as diagnostic-failed/diagnostic-timeout, retain their error classes/timings. Evidence.acceptance explicitly records supply, withdrawWETH, nativeRouteRefusal as passed/failed/blocked, diagnosticsDegraded boolean, overall status. Exit0 only all three runtime checks passed + diagnostics healthy; exit4 only all three passed but any diagnostic degraded; exit2 acceptance failure; exit3 blocked prerequisite/fatal launch. Missing/skipped/blocked runtime steps MUST NOT yield0 or4. Mark native-route capability blocked separately from its successful rejection-test result. Cleanup failure or leftover owned listener is acceptance failure. The native test not attempted due to budget fails acceptance rather than silent success.
