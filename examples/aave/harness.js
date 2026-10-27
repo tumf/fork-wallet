@@ -175,29 +175,32 @@ function gitRead(args) {
 }
 
 async function main() {
-  requireNoCredentials(process.env);
-  if (!fs.existsSync(SANDBOX_EXEC)) throw new Error('sandbox-exec missing; refusing to run the app server without egress control');
-  // Pin + tracked-clean check before anything is launched or any transaction can exist. No fetch/install here.
-  const pin = await run('aave.pin', async () => {
-    const head = gitRead(['rev-parse', 'HEAD']);
-    const trackedStatus = gitRead(['status', '--porcelain', '--untracked-files=no']);
-    evidence.aaveCommit = head;
-    const result = L.checkAavePin({ head, trackedStatus });
-    evidence.aaveTrackedClean = typeof trackedStatus === 'string' && result.dirty.length === 0 ? true : result.dirty;
-    if (!result.ok) throw new Error(`refusing to test an unpinned or changed Aave app: ${result.reasons.join('; ')}`);
-    return { head, trackedClean: true };
-  }, { fatal: true });
-  launched.aave = Boolean(pin);
-  ADDR = loadAddresses();
-  evidence.addresses = ADDR;
-  const deadline = Date.now() + TOTAL_BUDGET_MS;
-  const budgetLeft = () => deadline - Date.now();
-  const env = scrubbedEnv(process.env);
-  env.PATH = `${NODE_BIN_DIR}:${env.PATH}`;
-
   let anvil = null; let anvilPort = null; let gateway = null; let next = null; let browser = null; let tmpHome = null; let walletRef = null;
   const close = {};
+  // The pre-launch refusals run inside the same try/finally as the run itself, so a refusal still records close,
+  // launched and a verified cleanup verdict (including the Aave tracked-status recheck once the pin check passed) and
+  // classifies as BLOCKED (exit 3) instead of FAILED with an unverified cleanup.
   try {
+    requireNoCredentials(process.env);
+    if (!fs.existsSync(SANDBOX_EXEC)) throw new Error('sandbox-exec missing; refusing to run the app server without egress control');
+    // Pin + tracked-clean check before anything is launched or any transaction can exist. No fetch/install here.
+    const pin = await run('aave.pin', async () => {
+      const head = gitRead(['rev-parse', 'HEAD']);
+      const trackedStatus = gitRead(['status', '--porcelain', '--untracked-files=no']);
+      evidence.aaveCommit = head;
+      const result = L.checkAavePin({ head, trackedStatus });
+      evidence.aaveTrackedClean = typeof trackedStatus === 'string' && result.dirty.length === 0 ? true : result.dirty;
+      if (!result.ok) throw new Error(`refusing to test an unpinned or changed Aave app: ${result.reasons.join('; ')}`);
+      return { head, trackedClean: true };
+    }, { fatal: true });
+    launched.aave = Boolean(pin);
+    ADDR = loadAddresses();
+    evidence.addresses = ADDR;
+    const deadline = Date.now() + TOTAL_BUDGET_MS;
+    const budgetLeft = () => deadline - Date.now();
+    const env = scrubbedEnv(process.env);
+    env.PATH = `${NODE_BIN_DIR}:${env.PATH}`;
+
     // 1. Upstream reachability + fixed fork block (read-only, no credentials).
     const latest = await run('upstream.eth_blockNumber', async () => Number(await publicRpc('eth_blockNumber')), { fatal: true });
     const forkBlock = latest - 5;

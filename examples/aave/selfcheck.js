@@ -8,6 +8,8 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const http = require('node:http');
+const os = require('node:os');
+const { execFileSync, spawnSync } = require('node:child_process');
 const path = require('node:path');
 const L = require('./lib.js');
 
@@ -311,6 +313,34 @@ check('outcome: prerequisite fatal = exit 3; acceptance-stage fatal, other failu
   assert.equal(classify([...healthyDiag, ...passedRuntime()], { sentinelHits: 1 }).exitCode, 2);
   assert.equal(classify([]).exitCode, 2); // nothing ran and no fatal recorded: never 0/4
   assert.deepEqual(L.EXIT, { PASS: 0, FAILED: 2, BLOCKED: 3, DEGRADED: 4 });
+});
+
+check('harness: real pre-launch pin refusal (unpinned temp Aave repo) = exit 3 BLOCKED with verified cleanup', () => {
+  // Drives harness.js itself, not a hand-injected cleanup record. The pin check precedes any network access or launch.
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'fork-wallet-aave-unpinned-'));
+  let artifactDir = null;
+  try {
+    const git = (...args) => execFileSync('/usr/bin/git', ['-C', repo, '-c', 'user.name=selfcheck', '-c', 'user.email=selfcheck@invalid', '-c', 'commit.gpgsign=false', ...args], { stdio: 'ignore' });
+    git('init', '-q');
+    fs.writeFileSync(path.join(repo, 'README.md'), 'not the pinned Aave interface\n');
+    git('add', 'README.md');
+    git('commit', '-q', '-m', 'unpinned');
+    const env = { PATH: process.env.PATH, HOME: os.tmpdir(), AAVE_DIR: repo };
+    const r = spawnSync(process.execPath, [path.join(__dirname, 'harness.js')], { env, encoding: 'utf8', timeout: 60000 });
+    const m = /^evidence: (.+evidence\.json)$/m.exec(r.stdout || '');
+    assert.ok(m, `no evidence path in harness output: ${(r.stdout || '').slice(-400)} ${(r.stderr || '').slice(-400)}`);
+    artifactDir = path.dirname(m[1]);
+    const e = JSON.parse(fs.readFileSync(m[1], 'utf8'));
+    assert.equal(r.status, 3, `harness exit ${r.status}`);
+    assert.equal(e.acceptance.overall, 'BLOCKED'); assert.equal(e.acceptance.exitCode, 3);
+    assert.equal(e.fatal.stage, 'prerequisite'); assert.equal(e.fatal.step, 'aave.pin');
+    assert.equal(e.acceptance.reasons.some((x) => /cleanup not verified/.test(x)), false, e.acceptance.reasons.join(' | '));
+    assert.equal(e.cleanup.ok, true); assert.deepEqual(e.launched, {}); assert.ok(e.close && typeof e.close === 'object');
+    assert.equal(e.steps.some((s) => s.name === 'upstream.eth_blockNumber'), false); // refused before any network access
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    if (artifactDir && path.dirname(artifactDir) === path.join(__dirname, 'artifacts')) fs.rmSync(artifactDir, { recursive: true, force: true });
+  }
 });
 
 // 10b. Supervised gate (gate.js): exit 4 is accepted only after inspecting the evidence; never a clean PASS.
