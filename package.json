@@ -1,6 +1,6 @@
 {
   "name": "fork-wallet",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Test-only EIP-1193 wallet for Playwright that submits real transactions through your own loopback Anvil node",
   "license": "UNLICENSED",
   "private": true,
@@ -28,8 +28,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test --test-reporter=spec test/unit.test.js test/provider.test.js",
-    "test:sdk": "node test/run-gate.js test/anvil.test.js test/sdk-compat.test.js test/integration.test.js",
+    "test": "node --test --test-reporter=spec test/unit.test.js test/provider.test.js test/signing.test.js",
+    "test:sdk": "node test/run-gate.js test/anvil.test.js test/sdk-compat.test.js test/signing-compat.test.js test/integration.test.js",
     "test:integration": "node test/run-gate.js test/integration.test.js",
     "test:all": "npm test && npm run test:sdk",
     "test:pack": "node test/pack-consumer.js"
