@@ -58,6 +58,23 @@ test('legacy API fixture on vanilla Anvil: strict render, enable connect, one re
     blocked.push(route.request().url());
     return route.abort();
   });
+  // Test-only recorder for the production initial connect, which is scheduled from the asynchronous __forkWalletInit
+  // result and may fire before or after the module fixture attaches its own listener. It subscribes through the
+  // EIP-6963 announce (same pattern as sdk-compat) regardless of whether it runs before or after the wallet script.
+  await context.addInitScript(() => {
+    if (window.top !== window) return;
+    const connects = [];
+    window.__initConnects = connects;
+    let hooked = false;
+    const hook = (event) => {
+      if (hooked) return;
+      hooked = true;
+      event.detail.provider.on('connect', (info) => connects.push(info));
+    };
+    window.addEventListener('eip6963:announceProvider', hook);
+    if (!window.ethereum) return; // wallet script not yet run (or about:blank): its own announce reaches the listener
+    window.dispatchEvent(new Event('eip6963:requestProvider'));
+  });
 
   const policy = [];
   const wallet = await installForkWallet(context, {
@@ -88,12 +105,22 @@ test('legacy API fixture on vanilla Anvil: strict render, enable connect, one re
     return status();
   };
   const legacyEvents = () => page.evaluate(() => window.legacyEvents.map(([name]) => name));
+  const initConnects = () => page.evaluate(() => window.__initConnects);
   const sends = () => wallet.calls.filter((c) => c.method === 'eth_sendTransaction');
 
   // 1. Strict legacy render succeeded on the actual injected (frozen) provider.
   await page.waitForFunction(() => document.body.dataset.rendered !== undefined);
   assert.equal(await page.locator('body').getAttribute('data-rendered'), 'false');
   assert.deepEqual(errors, [], 'strict render threw no page error');
+  // Initialization is pinned before any legacy operation: exactly one genuine initial connect on the local chain
+  // (missing within the bound fails). The module listener may or may not have seen it depending on timing, so its
+  // event log after initialization is validated and taken as the baseline for every later comparison.
+  await page.waitForFunction(() => window.__initConnects && window.__initConnects.length > 0, null, { timeout: 10000 });
+  assert.deepEqual(await initConnects(), [{ chainId: '0x7a69' }], 'exactly one initial connect with the local chain');
+  const baseline = await page.evaluate(() => JSON.parse(JSON.stringify(window.legacyEvents)));
+  assert.ok([0, 1].includes(baseline.length), 'module saw at most the one initial event: ' + JSON.stringify(baseline));
+  if (baseline.length) assert.deepEqual(baseline, [['connect', { chainId: '0x7a69' }]]);
+  const base = baseline.map(([name]) => name);
   const surface = await page.evaluate(() => ({
     frozen: Object.isFrozen(window.ethereum), isForkWallet: window.ethereum.isForkWallet, keys: Object.keys(window.ethereum),
     send: typeof window.ethereum.send, sendAsync: typeof window.ethereum.sendAsync, isMetaMask: window.ethereum.isMetaMask,
@@ -120,7 +147,7 @@ test('legacy API fixture on vanilla Anvil: strict render, enable connect, one re
   const badArgs = await page.evaluate(() => window.ethereum.enable(undefined).then(() => 'resolved', (e) => e.code));
   assert.equal(badArgs, CODES.INVALID_PARAMS);
   assert.equal(wallet.calls.length, 0, 'no approval admitted by render, refusals or bad arguments');
-  assert.deepEqual(await legacyEvents(), []);
+  assert.deepEqual(await page.evaluate(() => JSON.parse(JSON.stringify(window.legacyEvents))), baseline, 'no event from refusals or bad arguments');
 
   // 2. Unauthorized: a send is refused; a rejected enable grants nothing and submits nothing.
   const start = await snapshot();
@@ -138,7 +165,7 @@ test('legacy API fixture on vanilla Anvil: strict render, enable connect, one re
   assert.equal(await act('#connect'), `ok 3 ${account}`);
   assert.equal(wallet.authorized, true);
   assert.deepEqual(wallet.calls.map((c) => [c.method, c.outcome]), [['eth_requestAccounts', 'rejected'], ['eth_requestAccounts', 'approved']]);
-  assert.deepEqual(await legacyEvents(), ['accountsChanged']);
+  assert.deepEqual(await legacyEvents(), [...base, 'accountsChanged']);
   const reads = await page.evaluate(async ([gateway, who]) => {
     const viaGateway = async (method, params) => (await (await fetch(gateway, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) })).json()).result;
@@ -186,10 +213,11 @@ test('legacy API fixture on vanilla Anvil: strict render, enable connect, one re
   assert.equal(wallet.submitted.length, 1);
   assert.equal(sends().length, 1, 'only the approved send was admitted');
   assert.equal(policy.length, 2, 'refused sends never reached the policy');
-  assert.deepEqual(await legacyEvents(), ['accountsChanged', 'accountsChanged']);
+  assert.deepEqual(await legacyEvents(), [...base, 'accountsChanged', 'accountsChanged']);
+  assert.deepEqual(await initConnects(), [{ chainId: '0x7a69' }], 'no later connect was emitted');
   assert.deepEqual(errors, []);
   assert.deepEqual(blocked, [], 'no external HTTP or WebSocket request was attempted');
   console.log('legacy-compat evidence ' + JSON.stringify({ scope: 'synthetic legacy API fixture on owned vanilla Anvil 31337; not third-party app or fork swap acceptance',
-    hash, receiptStatus: receipt.status, nonce: { before: String(start.nonce), after: String(afterSend.nonce) },
+    initConnects: 1, moduleSawInitialConnect: base.length === 1, hash, receiptStatus: receipt.status, nonce: { before: String(start.nonce), after: String(afterSend.nonce) },
     recipientDelta: String(afterSend.recipient - start.recipient), submitted: wallet.submitted.length, calls: wallet.calls.map((c) => [c.method, c.outcome]) }));
 });
