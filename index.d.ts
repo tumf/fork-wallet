@@ -85,7 +85,7 @@ export interface SigningOptions {
   validateSignature(request: SignatureRequest): void | Promise<void>;
 }
 
-/** One admitted approval request. Field set is versioned with the package (0.2.0); see README migration. */
+/** One admitted approval request. Field set is versioned with the package (0.3.0: adds domain, signatureReturned, delivered); see README migration. */
 export interface Call {
   requestId: string;
   method: ApprovalMethod;

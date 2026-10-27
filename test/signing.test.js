@@ -252,8 +252,16 @@ test('signing approvals: signed outcome, reject/hold/release, single slot with s
   assert.equal(seen.length, policyRuns);
   assert.equal(w.calls.length, admitted);
   assert.throws(() => w.nextRequest({ method: 'personal_sign', mode: 'lost' }), (e) => e.code === CODES.INVALID_PARAMS);
+  // A queued same-method signing override does not bypass global lost and is left unconsumed.
+  w.nextRequest({ method: 'personal_sign', mode: 'reject' });
+  assert.equal(code(await ctx.request('personal_sign', [message, account])), CODES.INVALID_PARAMS);
+  assert.equal(seen.length, policyRuns);
+  assert.equal(w.calls.length, admitted);
   w.setMode('approve');
   assert.equal(code(await ctx.request('eth_sendTransaction', [{ from: account, to: target }])), CODES.USER_REJECTED, 'send override was not consumed by signing');
+  assert.equal(code(await ctx.request('personal_sign', [message, account])), CODES.USER_REJECTED, 'signing override survived global lost');
+  assert.equal(signs().at(-1).outcome, 'rejected');
+  assert.equal(dispatches(), 1);
   // Hold: shares the single approval slot with sends and permissions; wrong-ID, lost and double release refused.
   w.setMode('hold');
   const pending = ctx.request('eth_signTypedData_v4', [account, typed()]);

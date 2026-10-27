@@ -701,7 +701,7 @@ async function installForkWallet(context, options) {
 
   function takeMode(method) {
     // Signing never downgrades lost to approve: a global lost mode refuses it before admission, consuming nothing.
-    if (SIGNING_METHODS.includes(method) && mode === 'lost' && !overrides.some((o) => o.method === method)) {
+    if (SIGNING_METHODS.includes(method) && mode === 'lost') {
       signFail(CODES.INVALID_PARAMS, 'lost mode is not supported for signing');
     }
     const index = overrides.findIndex((o) => o.method === method);
@@ -834,7 +834,7 @@ async function installForkWallet(context, options) {
     try {
       if (!authorized) signFail(CODES.UNAUTHORIZED, `${method} requires an authorized account (eth_requestAccounts)`);
       const request = checkSignatureRequest(method, params, activeAccount(), active.chainId);
-      if (mode === 'lost' && !overrides.some((o) => o.method === method)) signFail(CODES.INVALID_PARAMS, 'lost mode is not supported for signing');
+      if (mode === 'lost') signFail(CODES.INVALID_PARAMS, 'lost mode is not supported for signing');
       const forward = method === 'personal_sign' ? [request.message, request.account] : [request.account, JSON.stringify(request.typedData)];
       const fields = { inputHash: crypto.createHash('sha256').update(JSON.stringify(request)).digest('hex'), signatureReturned: false, delivered: false };
       if (request.typedData) {
