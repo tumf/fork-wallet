@@ -6,14 +6,16 @@ transaction, and submits approved transactions through **your own loopback Anvil
 account. Reads are forwarded only from a bounded allowlist. The dApp under test sees real transaction hashes,
 receipts, revert data and state changes on a disposable local EVM.
 
-It is not MetaMask, not a production wallet, holds no key and signs nothing itself. Version 0.2.0 is the first
-bounded DeFi-provider stage: it is **not** general DeFi, mainnet-fork, real-wallet or arbitrary-dApp support (see
-[Limitations](#trust-boundaries-and-limitations)).
+It is not MetaMask, not a production wallet, holds no key and computes no signature itself. Version 0.3.0 adds
+**opt-in** `personal_sign` and `eth_signTypedData_v4` for disposable local accounts: when you install it with a
+signing policy, approved requests are signed by the owned node's unlocked account on local chains 31337/31338 only
+(see [Signing](#signing-opt-in)). It is **not** general DeFi, mainnet-fork, real-wallet, SIWE or arbitrary-dApp
+support (see [Limitations](#trust-boundaries-and-limitations)).
 
 ## Quickstart
 
 ```sh
-npm install --save-dev ./fork-wallet-0.2.0.tgz   # local tarball; the package is private and not published
+npm install --save-dev ./fork-wallet-0.3.0.tgz   # local tarball; the package is private and not published
 ```
 
 ```js
@@ -61,6 +63,7 @@ await node.stop();                  // stops only the child this helper started
 | `chains` | no | Additional pre-registered chains `[{endpoint, chainId, account, beforeSend}]`, unique chain IDs, not repeating the initial chain. No other chain can ever be added. |
 | `clientVersion` | no | RegExp for `web3_clientVersion`. Default `/^anvil\//i`. |
 | `timeoutMs` | no | Per-RPC timeout 1–15000. Default 15000. |
+| `signing` | no | Exactly `{validateSignature(request)}`. Absent (default): `personal_sign` and `eth_signTypedData_v4` are 4200. Present: every configured chain must be 31337 or 31338, otherwise install fails -32602. `validateTransaction` never implies a signing policy. See [Signing](#signing-opt-in). |
 
 ### Page methods
 
@@ -73,8 +76,9 @@ await node.stop();                  // stops only the child this helper started
 | `wallet_revokePermissions` | Params exactly `[{eth_accounts: {}}]`. Returns `null`, clears permission, invalidates pending requests, emits `accountsChanged([])`. Not a disconnect. |
 | `wallet_switchEthereumChain` | Params exactly `[{chainId}]`. Requires authorization (4100). Unregistered target 4902. Same chain: `null` without approval. Otherwise approval, then target preflight, then switch: `chainChanged(chainId)` and, when the account differs, `accountsChanged([account])`. |
 | `eth_sendTransaction` | Requires authorization (4100). See [Transactions](#transactions). |
+| `personal_sign`, `eth_signTypedData_v4` | 4200 unless installed with `signing` (recorded with reason `signing-disabled`). With a policy: requires authorization (4100) and is an approval request. See [Signing](#signing-opt-in). |
 | Reads | `eth_chainId` (answered locally), `net_version`, `eth_blockNumber`, `eth_getBalance`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionCount`, `eth_call`, `eth_estimateGas`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_feeHistory`, `eth_getBlockByNumber`, `eth_getBlockByHash`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getLogs`. Available without account permission. Forwarded to the active node after the ownership guard and per-method validation. |
-| Everything else | 4200 and recorded in `wallet.unsupported`: `personal_sign`, `eth_sign`, `eth_signTypedData*`, `wallet_sendTransaction`, `wallet_sendCalls`, `wallet_addEthereumChain`, `eth_sendRawTransaction`, `eth_subscribe`, filters, `anvil_*`, `evm_*`, `debug_*`, `admin_*`, … There is no passthrough. |
+| Everything else | 4200 and recorded in `wallet.unsupported`: `eth_sign`, `eth_signTypedData` / `_v1` / `_v3`, `eth_signTransaction`, `wallet_sendTransaction`, `wallet_sendCalls`, `wallet_addEthereumChain`, `eth_sendRawTransaction`, `eth_subscribe`, filters, `anvil_*`, `evm_*`, `debug_*`, `admin_*`, … There is no passthrough. |
 
 Request shape: an object with only `method` (string) and optional `params` (array), at most 1 MiB serialized
 (otherwise -32600). Zero-argument methods accept omitted params or `[]` only.
@@ -113,10 +117,77 @@ release) → preflight (`beforeSend`, `eth_chainId`, `web3_clientVersion`, `eth_
 `validateTransaction` → synchronous stale check and `dispatching` transition → one `eth_sendTransaction` on the bound
 node → hash check → enrichment by `eth_getTransactionByHash` (`sender`, `nonce`, `type`).
 
+### Signing (opt-in)
+
+```js
+const wallet = await installForkWallet(context, {
+  endpoint: node.endpoint, origin, chainId: 31337, account: node.account, beforeSend: node.beforeSend,
+  validateTransaction() {},
+  signing: {
+    // Mandatory. Called with a deep-frozen SignatureRequest before admission and again right before dispatch.
+    validateSignature(request) {
+      if (request.method === 'eth_signTypedData_v4' && request.typedData.primaryType !== 'TestNote') throw new Error('refused');
+    },
+  },
+});
+```
+
+Only for **disposable** accounts: the packaged `startAnvil` uses `--mnemonic-random` and accepts no key. If you
+register your own node, you are responsible for its accounts being throwaway. Signing is limited to chain IDs 31337
+and 31338; the chain ID is a scope limiter, **not** a cryptographic invalidation (a `personal_sign` signature is valid
+for that key on any chain). Mainnet-ID or fork signing would need a separate isolation design and is refused.
+
+Exact inputs (anything else is -32602, and messages never echo your data):
+
+- `personal_sign`: exactly `[message, address]`. `message` is even-length `0x` hex bytes, at most 65 536 bytes (empty
+  `0x` is structurally allowed and forwarded unchanged; Anvil decides). No plain UTF-8 string, no address-first alias.
+  `address` must equal the active authorized account (case-insensitive); no other unlocked or impersonated address.
+  Forwarded as `[message, activeAccount]`.
+- `eth_signTypedData_v4`: exactly `[address, typedData]`, `typedData` a JSON string or a plain object, at most 65 536
+  UTF-8 bytes (both as received and as re-serialized). JSON text is parsed exactly once with `JSON.parse` (duplicate
+  keys: last wins); the parsed value is what the policy sees and what is forwarded, as
+  `[activeAccount, JSON.stringify(typedData)]`. Only own plain objects/arrays, strings, booleans, `null` and
+  `Number.isSafeInteger` numbers; no floats, unsafe integers, `undefined`, functions, bigint, getters, sparse arrays or
+  `__proto__` / `prototype` / `constructor` keys; depth ≤ 32, ≤ 4096 values. Large integers must be decimal or hex
+  strings. Top-level keys exactly `types`, `primaryType`, `domain`, `message`. `types`: ≤ 64 types, each ≤ 64 unique
+  `{name, type}` fields (1–128 characters), must define `EIP712Domain`; `primaryType` names another defined type.
+  `domain` keys only `name`, `version` (strings), `chainId` (mandatory: safe integer, decimal string or canonical hex,
+  must equal the active chain), `verifyingContract` (20 bytes), `salt` (32 bytes), and `EIP712Domain` declares exactly
+  those keys with their standard types. `message` is an object. Type syntax and value encoding are left to Anvil:
+  invalid nested values fail there (sanitized error), never with a fake success.
+
+Order: caller frame → request shape → opt-in (4200) → params array → transport (4900) → authorization (4100) →
+input (-32602) → lost check (-32602) → `validateSignature` → **admission** → decision (mode / held release) →
+preflight → `validateSignature` → synchronous stale check and `dispatching` → one RPC on the bound node → result must
+be exactly 65 bytes of hex → synchronous recheck of epoch, connection, authorization, active chain and account →
+the actual Anvil signature is returned.
+
+Signing records in `calls` contain `requestId`, `method`, `account`, `chainId`, `endpoint`, `epoch`, `mode`, times,
+`outcome`, `inputHash` (sha256 of the normalized request), `domain` (`{chainId, verifyingContract}` for typed data),
+`signatureReturned` (a well-formed signature came back from the node) and `delivered` (it was returned to the page).
+They **never** contain the message, the typed data or the signature, and `submitted` stays transaction hashes only.
+Errors on signing paths carry a fixed message and the numeric code only: no upstream message or `data` (Anvil echoes
+payload values in its errors), no text thrown by your policy (refusal is -32603 `signature refused by policy`).
+
+| Signing `outcome` | Meaning |
+| --- | --- |
+| `signed` | The node signed; the page got the signature. |
+| `signed-discarded` | The node returned a signature, but the scope changed after dispatch (revoke/account 4100, chain 4901, disconnect 4900). Attribution stays with the original epoch/account/chain; the signature is dropped, not delivered. Generation cannot be undone. |
+| `unknown` | Timeout, transport or integrity failure after dispatch, or a malformed result (-32603). **A signature may have been generated**; this is never proof that none was. |
+| `failed` | Before dispatch, or the node answered with a JSON-RPC error (its numeric code is kept, its message dropped). |
+| `rejected` / `cancelled` | 4001 / invalidated before dispatch. Nothing was sent to the node. |
+
+Signing has no `lost` mode: while `setMode('lost')` is active a signing request fails -32602 before the policy and
+before admission (no one-shot override is consumed), `nextRequest({method: <signing>, mode: 'lost'})` throws -32602,
+and `release(id, 'lost')` on a held signing request throws and leaves it held. There are no retries.
+
+Do not record Playwright traces, HAR files, videos or screenshots of contexts that sign, and do not log page values
+that hold signatures; keep signatures in the page and return booleans (for example an in-page recovery check).
+
 ### Modes and approvals
 
-Approval requests are `eth_requestAccounts`, `wallet_requestPermissions`, `wallet_switchEthereumChain` and
-`eth_sendTransaction`. Exactly one may be outstanding at a time (including while dispatching); another gets -32002.
+Approval requests are `eth_requestAccounts`, `wallet_requestPermissions`, `wallet_switchEthereumChain`,
+`eth_sendTransaction` and, when enabled, `personal_sign` / `eth_signTypedData_v4`. Exactly one may be outstanding at a time (including while dispatching); another gets -32002.
 Reads run in parallel.
 
 | Mode | Next approval request |
@@ -124,7 +195,7 @@ Reads run in parallel.
 | `approve` (default) | Approved. |
 | `reject` | 4001, nothing changes, nothing is submitted. |
 | `hold` | Waits for `release(requestId, outcome)`. |
-| `lost` | Transactions only: submitted, hash recorded in `submitted`, then -32603 to the page. Connection, permission and switch requests treat a global `lost` as `approve`. |
+| `lost` | Transactions only: submitted, hash recorded in `submitted`, then -32603 to the page. Connection, permission and switch requests treat a global `lost` as `approve`; signing requests fail -32602. |
 
 `nextRequest({method, mode})` queues a one-shot decision for the next request of that approval method (reads never
 consume it; `lost` is valid only for `eth_sendTransaction`). `whenHeld()` resolves with the held `requestId`.
@@ -147,6 +218,7 @@ chain and finishes as one of:
 | `failed` | Before dispatch (preflight etc.), or the node answered with a JSON-RPC error (code/message/data preserved). |
 | `rejected` / `cancelled` | Decision 4001 / invalidated by a scope change. Nothing was sent. |
 | `approved` | A non-transaction approval that completed. |
+| `signed` / `signed-discarded` | Signing only; see [Signing](#signing-opt-in). |
 
 There are no internal retries and no same-calldata deduplication. Exactly-once is not claimed: reconcile with the
 node (`eth_getTransactionCount`, receipts by hash) before any retry of your own.
@@ -154,7 +226,7 @@ node (`eth_getTransactionCount`, receipts by hash) before any retry of your own.
 ### Handle
 
 - `calls`, `submitted`, `unsupported`, `info` (frozen EIP-6963 info), `chainId`, `account`, `chains`, `mode`,
-  `connected`, `authorized`, `epoch`, `held`, `heldRequestId`.
+  `signing` (installed with a signing policy), `connected`, `authorized`, `epoch`, `held`, `heldRequestId`.
 - `setMode(mode)`, `nextRequest({method, mode})`, `whenHeld()`, `release(requestId, outcome = 'approve')`.
 - `revoke()`: clears permission, emits `accountsChanged([])`.
 - `disconnect()`: transport loss; pending request fails 4900; later requests 4900 (`eth_accounts` returns `[]`,
@@ -183,22 +255,24 @@ state is known) and after `reconnect()`; never per request.
 | Code | When |
 | --- | --- |
 | 4001 | Rejected decision. |
-| 4100 | Not authorized (send/switch before connect), or the request was invalidated by revoke / account change. |
-| 4200 | Unsupported method, or a caller that is not the allowed origin's main frame. |
+| 4100 | Not authorized (send/switch/sign before connect), or the request was invalidated by revoke / account change. |
+| 4200 | Unsupported method, signing without a signing policy, or a caller that is not the allowed origin's main frame. |
 | 4900 | Disconnected. |
 | 4901 | Selected node unavailable: ownership guard, chain, client or account preflight failed, or invalidated by a chain switch. |
 | 4902 | `wallet_switchEthereumChain` to an unregistered chain. |
 | -32002 | Another approval is outstanding. |
 | -32600 | Malformed request object (not an object, extra keys, non-string method, > 1 MiB). |
-| -32602 | Malformed params / transaction / read, or invalid install options. |
+| -32602 | Malformed params / transaction / read / signing input, wrong signer or typed-data domain, signing in lost mode, or invalid install options. |
 | -32603 | Policy refusal, lost response, unknown outcome, RPC integrity failure. |
 | other | Upstream JSON-RPC errors from the node are passed through (e.g. 3 with revert `data`). |
 
 Other exports: `createLoopbackRpc(endpoint, {timeoutMs, maxResponseBytes})` (strict, bounded, never retries; errors
 carry `kind`: `upstream`, `transport` or `integrity`), `validateReadRequest`, `checkTransaction`,
-`requireLoopbackEndpoint`, `requireOrigin`, `normalizeChainId`, `ForkWalletError(code, message, data?)`, `MODES`,
-`RELEASE_OUTCOMES`, `METHODS`, `READ_METHODS`, `WALLET_METHODS`, `APPROVAL_METHODS`, `TRANSACTION_FIELDS`,
-`TRANSACTION_TYPES`, `STATES`, `CODES`, `LIMITS`, `PROVIDER_INFO`.
+`checkSignatureRequest(method, params, account, chainId)`, `requireLoopbackEndpoint`, `requireOrigin`,
+`normalizeChainId`, `ForkWalletError(code, message, data?)`, `MODES`, `RELEASE_OUTCOMES`, `METHODS`, `READ_METHODS`,
+`WALLET_METHODS`, `APPROVAL_METHODS`, `SIGNING_METHODS`, `SIGNING_CHAINS`, `TRANSACTION_FIELDS`, `TRANSACTION_TYPES`,
+`STATES`, `CODES`, `LIMITS`, `PROVIDER_INFO`. `METHODS` and `APPROVAL_METHODS` are static supported-capability lists
+that include the signing methods; they say nothing about whether a given install enabled signing.
 
 ## API: `fork-wallet/anvil`
 
@@ -225,6 +299,19 @@ writes, signing, `anvil_*`/`evm_*`/`debug_*`/`admin_*` and unknown methods get 4
 CORS is granted only to the origin set by `configureOrigin(origin)` (once; a different origin later throws); requests
 carrying any other `Origin`, or any `Origin` before configuration, get 403. Requests without an `Origin` (your Node
 test runner) are served without CORS headers.
+
+## Migration from 0.2.0
+
+0.3.0 is additive for installs without `signing`: both signing methods stay 4200 (now recorded with reason
+`signing-disabled` instead of `unsupported-method`) and every other behaviour is unchanged.
+
+| 0.2.0 | 0.3.0 |
+| --- | --- |
+| `METHODS` / `APPROVAL_METHODS` / `ApprovalMethod` without signing. | They include `personal_sign` and `eth_signTypedData_v4` (static capability). Filter `calls` by `method` if you only want transactions. |
+| `CallState` had no signing states. | Adds `signed` and `signed-discarded`; `Call` adds `domain`, `signatureReturned`, `delivered`. `inputHash` of a signing record hashes the normalized request. |
+| `UnsupportedRecord.reason`: `unsupported-method` / `caller-frame`. | Adds `signing-disabled`. |
+| No `signing` option. | `signing: {validateSignature}` enables signing on chains 31337/31338 only. |
+| `LIMITS` had no signing bounds. | Adds `signMessageBytes`, `typedDataBytes`, `typedDataDepth`, `typedDataNodes`, `typedDataTypes`, `typedDataFields`, `typedDataNameChars`. |
 
 ## Migration from 0.1.1
 
@@ -254,17 +341,23 @@ test runner) are served without CORS headers.
   (bundled with esbuild 0.28.2) in Playwright 1.56.1 Chromium against Anvil 1.8.3 vanilla chains 31337/31338 on the
   host recorded in ACCEPTANCE.md. Other versions, other SDK paths, React layers, mainnet/Polygon forks, Permit2 and
   existing third-party dApps are not claimed.
-- **No signing in this stage.** `personal_sign`, `eth_sign`, EIP-712, `eth_signTransaction`, raw submission, account
-  abstraction (`wallet_sendCalls`), `wallet_sendTransaction` and `wallet_addEthereumChain` are honest 4200 responses.
-- **`beforeSend` and `validateTransaction` are trusted harness callbacks**, not cryptographic proofs. The packaged
+- **Signing is opt-in, local and disposable only.** Only `personal_sign` and `eth_signTypedData_v4`, only with a
+  signing policy, only on chains 31337/31338, only by the active authorized node account. Signatures are real: a
+  local chain ID does not make a `personal_sign` signature unusable elsewhere, so never sign with a key that matters.
+  No ERC-2612/Permit2 consumption, SIWE or authentication server is exercised or claimed. `eth_sign`,
+  `eth_signTypedData` v1/v3, `eth_signTransaction`, raw submission, external key input, key export, account
+  abstraction (`wallet_sendCalls`, EIP-5792/7702), `wallet_sendTransaction` and `wallet_addEthereumChain` are honest
+  4200 responses. The read gateway never signs.
+- **`beforeSend`, `validateTransaction` and `validateSignature` are trusted harness callbacks**, not cryptographic
+  proofs (`beforeSend` is not proof that a key is fresh). The packaged
   `beforeSend` checks the owned child and its exclusive listener with `lsof`; a hostile privileged local process is out
   of scope. An empty validator submits any well-formed transaction on your node.
 - **Not a sandbox.** Exact-origin binding, main-frame checks, CSP and Playwright route deny lists in the tests are
   protection against accidental network use, not OS-level isolation. Nothing stops a malicious same-origin page from
   replacing its own JS objects. The management endpoint is unauthenticated loopback HTTP.
 - **Anvil accounts are disposable.** `startAnvil` uses `--mnemonic-random`; never fund such accounts on a real chain.
-- **Ambiguous submission.** `unknown` and transport failures are not proof of no send. Reconcile on the node before
-  retrying.
+- **Ambiguous submission.** `unknown` and transport failures are not proof of no send, and for signing not proof that
+  no signature was generated. Reconcile on the node before retrying.
 - Node >= 22. No runtime dependencies. Playwright is an optional peer (>= 1.40). `lsof` is required by
   `fork-wallet/anvil`. macOS is the executed platform; Linux portability is not certified.
 
@@ -272,10 +365,10 @@ test runner) are served without CORS headers.
 
 | Command | What it covers | Needs |
 | --- | --- | --- |
-| `npm test` | `test/unit.test.js`, `test/provider.test.js`: option/request/frame refusals, transaction and read schemas, RPC integrity and bounds, preflight, modes, permissions, registered chains, epochs and late policy races, outcomes, events, page provider and EIP-6963 in a VM. In-memory doubles only (stubbed `fetch`, fake context). | Node |
-| `npm run test:sdk` | Bounded runner (`test/run-gate.js`, 180 s total) for `test/anvil.test.js` (owned lifecycle, fake-binary failures, foreign listener, gateway rules), `test/sdk-compat.test.js` (real Chromium + bundled ethers/viem/wagmi-core on two owned chains, receipts and state, revert data, logs, lost/fallback, switch, reload/reconnect, negative routing) and `test/integration.test.js` (generic dApp regression). Evidence: `artifacts/sdk/<ts>/evidence.json`, `artifacts/local-anvil/<ts>/`. | Anvil 1.8.3, Playwright Chromium (`PLAYWRIGHT_BROWSERS_PATH` honoured), `lsof` |
+| `npm test` | `test/unit.test.js`, `test/provider.test.js`, `test/signing.test.js`: option/request/frame refusals, transaction and read schemas, RPC integrity and bounds, preflight, modes, permissions, registered chains, epochs and late policy races, outcomes, events, page provider and EIP-6963 in a VM; signing opt-in, exact input bounds, handle order, approvals, pre/post-dispatch scope races and sentinel redaction (synthetic stub results, labelled as such; not cryptographic evidence). In-memory doubles only (stubbed `fetch`, fake context). | Node |
+| `npm run test:sdk` | Bounded runner (`test/run-gate.js`, 180 s total) for `test/anvil.test.js` (owned lifecycle, fake-binary failures, foreign listener, gateway rules), `test/sdk-compat.test.js` (real Chromium + bundled ethers/viem/wagmi-core on two owned chains, receipts and state, revert data, logs, lost/fallback, switch, reload/reconnect, negative routing; signing stays 4200 there), `test/signing-compat.test.js` (own policy-enabled context: ethers/viem/wagmi-core sign both methods, ethers and viem recover in-page, refusals and races with dispatch counters, read gateway refusal, redaction of the evidence file) and `test/integration.test.js` (generic dApp regression). Evidence: `artifacts/sdk/<ts>/evidence.json`, `artifacts/signing/<ts>/evidence.json`, `artifacts/local-anvil/<ts>/`. | Anvil 1.8.3, Playwright Chromium (`PLAYWRIGHT_BROWSERS_PATH` honoured), `lsof` |
 | `npm run test:integration` | Only the generic dApp regression, same bounded runner. | same |
-| `npm run test:pack` | `npm pack`, install into a throwaway consumer outside the repo, load `fork-wallet` and `fork-wallet/anvil` from CJS and ESM, check that private paths are not exported and that there are no runtime dependencies. | Node, npm |
+| `npm run test:pack` | `npm pack`, install into a throwaway consumer outside the repo, load `fork-wallet` and `fork-wallet/anvil` from CJS and ESM, check that private paths are not exported, that there are no runtime dependencies and that signing is default-disabled and opt-in through the installed exports. | Node, npm |
 
 Missing tools are failures, never skips. No test contacts anything beyond 127.0.0.1.
 

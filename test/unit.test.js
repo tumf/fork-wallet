@@ -74,7 +74,8 @@ test('requests: exact request shape, main-frame caller origin, method allowlist 
     'anvil_setBalance', 'evm_mine', 'debug_traceCall', 'admin_peers', 'eth_sendRawTransaction', 'eth_subscribe', 'wallet_sendCalls', 'eth_signTransaction']) {
     assert.equal(code(await ctx.request(method)), CODES.UNSUPPORTED_METHOD, method);
   }
-  assert.deepEqual(w.unsupported.filter((u) => u.reason === 'unsupported-method').map((u) => u.method).slice(0, 2), ['eth_sign', 'personal_sign']);
+  assert.deepEqual(w.unsupported.filter((u) => u.reason === 'unsupported-method').map((u) => u.method).slice(0, 2), ['eth_sign', 'wallet_addEthereumChain']);
+  assert.deepEqual(w.unsupported.filter((u) => u.reason === 'signing-disabled').map((u) => u.method), ['personal_sign', 'eth_signTypedData_v4'], 'signing absent: 4200 recorded as signing-disabled');
   assert.equal(code(await ctx.request('eth_chainId', ['x'])), CODES.INVALID_PARAMS);
   assert.equal(code(await ctx.request('eth_accounts', 'nope')), CODES.INVALID_PARAMS);
   assert.equal(code(await ctx.request('eth_accounts', {})), CODES.INVALID_PARAMS);

@@ -1,7 +1,8 @@
 'use strict';
 // fork-wallet: a test-only EIP-1193 / EIP-6963 wallet injected into a Playwright BrowserContext.
 // It submits only through owned loopback JSON-RPC nodes (Anvil by default) using their unlocked accounts. It holds
-// no key, signs nothing itself, forwards only an allowlist of bounded read methods and never imports product code.
+// no key and computes no signature itself: opt-in personal_sign / eth_signTypedData_v4 are forwarded to the owned
+// node's unlocked account. It forwards only an allowlist of bounded read methods and never imports product code.
 
 const crypto = require('node:crypto');
 
@@ -14,8 +15,13 @@ const READ_METHODS = Object.freeze([
   'eth_feeHistory', 'eth_getBlockByNumber', 'eth_getBlockByHash', 'eth_getTransactionByHash',
   'eth_getTransactionReceipt', 'eth_getLogs',
 ]);
+/** Signing methods. Supported capability only: each install enables them solely through the `signing` option. */
+const SIGNING_METHODS = Object.freeze(['personal_sign', 'eth_signTypedData_v4']);
+/** Local chain IDs (31337, 31338) on which signing may be enabled. Not a mainnet-ID fork isolation design. */
+const SIGNING_CHAINS = Object.freeze(['0x7a69', '0x7a6a']);
 /** Wallet methods that need a control-mode decision (approve / reject / hold / lost). */
-const APPROVAL_METHODS = Object.freeze(['eth_requestAccounts', 'wallet_requestPermissions', 'wallet_switchEthereumChain', 'eth_sendTransaction']);
+const APPROVAL_METHODS = Object.freeze(['eth_requestAccounts', 'wallet_requestPermissions', 'wallet_switchEthereumChain', 'eth_sendTransaction',
+  ...SIGNING_METHODS]);
 const WALLET_METHODS = Object.freeze(['eth_accounts', 'wallet_getPermissions', 'wallet_revokePermissions', ...APPROVAL_METHODS]);
 const METHODS = Object.freeze([...WALLET_METHODS, ...READ_METHODS]);
 const TRANSACTION_FIELDS = Object.freeze(['from', 'to', 'value', 'data', 'chainId', 'gas', 'gasPrice', 'maxFeePerGas',
@@ -23,7 +29,7 @@ const TRANSACTION_FIELDS = Object.freeze(['from', 'to', 'value', 'data', 'chainI
 const CALL_FIELDS = TRANSACTION_FIELDS;
 const TRANSACTION_TYPES = Object.freeze(['0x0', '0x1', '0x2']);
 const STATES = Object.freeze(['admitted', 'held', 'dispatching', 'submitted', 'rejected', 'response-lost', 'unknown',
-  'failed', 'cancelled', 'approved']);
+  'failed', 'cancelled', 'approved', 'signed', 'signed-discarded']);
 const CODES = Object.freeze({
   USER_REJECTED: 4001, UNAUTHORIZED: 4100, UNSUPPORTED_METHOD: 4200, DISCONNECTED: 4900, CHAIN_DISCONNECTED: 4901,
   UNRECOGNIZED_CHAIN: 4902, REQUEST_PENDING: -32002, INVALID_REQUEST: -32600, INVALID_PARAMS: -32602, INTERNAL: -32603,
@@ -31,7 +37,8 @@ const CODES = Object.freeze({
 const LIMITS = Object.freeze({
   requestBytes: 1024 * 1024, responseBytes: 16 * 1024 * 1024, errorDataBytes: 64 * 1024, batch: 20, logRange: 10000,
   logAddresses: 20, topicPositions: 4, topicAlternatives: 20, feeHistoryBlocks: 1024, feeHistoryPercentiles: 100,
-  accessListItems: 1024, timeoutMs: 15000,
+  accessListItems: 1024, timeoutMs: 15000, signMessageBytes: 65536, typedDataBytes: 65536, typedDataDepth: 32,
+  typedDataNodes: 4096, typedDataTypes: 64, typedDataFields: 64, typedDataNameChars: 128,
 });
 const DEFAULT_CLIENT = /^anvil\//i;
 const DEFAULT_TIMEOUT_MS = LIMITS.timeoutMs;
@@ -40,6 +47,8 @@ const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 const BYTES = /^0x(?:[0-9a-fA-F]{2})*$/;
 const QUANTITY = /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]{0,63})$/;
+const DECIMAL = /^(?:0|[1-9][0-9]{0,77})$/;
+const SIGNATURE = /^0x[0-9a-fA-F]{130}$/;
 const PROVIDER_INFO = Object.freeze({
   name: 'Fork Wallet',
   rdns: 'dev.forkwallet.test',
@@ -304,6 +313,149 @@ async function validateReadRequest(method, params, rpc) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// Signing input validation. Messages are constants: page-supplied keys, type names and values are never echoed.
+
+/** Errors whose message is a constant, safe to return from a signing path. Anything else is replaced. */
+const FIXED_ERRORS = new WeakSet();
+function signFail(code, message) {
+  const error = new ForkWalletError(code, message);
+  FIXED_ERRORS.add(error);
+  throw error;
+}
+const SIGNING_MESSAGES = Object.freeze({
+  [CODES.USER_REJECTED]: 'user rejected the request', [CODES.UNAUTHORIZED]: 'signing account permission changed or missing',
+  [CODES.DISCONNECTED]: 'wallet disconnected', [CODES.CHAIN_DISCONNECTED]: 'selected chain changed or unavailable',
+  [CODES.REQUEST_PENDING]: 'another approval request is outstanding', [CODES.INVALID_PARAMS]: 'invalid signing request',
+});
+/** Signing-path error with a constant message and the numeric code only (no data, no upstream or thrown text). */
+function signingError(error) {
+  if (FIXED_ERRORS.has(error)) return error;
+  const code = codeOf(error);
+  const fixed = new ForkWalletError(code, SIGNING_MESSAGES[code] || 'signing request failed');
+  FIXED_ERRORS.add(fixed);
+  return fixed;
+}
+
+const TYPED_DATA_KEYS = Object.freeze(['domain', 'message', 'primaryType', 'types']);
+/** EIP712Domain field types for the only domain keys accepted. */
+const DOMAIN_FIELDS = Object.freeze({ name: 'string', version: 'string', chainId: 'uint256', verifyingContract: 'address', salt: 'bytes32' });
+const FORBIDDEN_KEYS = Object.freeze(['__proto__', 'prototype', 'constructor']);
+const badSign = (message) => signFail(CODES.INVALID_PARAMS, message);
+
+/**
+ * Fresh JSON-safe copy: own plain objects/arrays, strings, booleans, null and safe integers only, bounded by
+ * LIMITS.typedDataDepth and LIMITS.typedDataNodes. Rejects getters, holes, symbols, prototype keys and any other value.
+ */
+function jsonSafe(value, budget, depth) {
+  if (++budget.nodes > LIMITS.typedDataNodes) badSign(`typed data exceeds ${LIMITS.typedDataNodes} values`);
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value)) badSign('typed data numbers must be safe integers (use decimal or hex strings for large values)');
+    return value;
+  }
+  if (typeof value !== 'object') badSign('typed data must contain only JSON values');
+  if (depth > LIMITS.typedDataDepth) badSign(`typed data exceeds depth ${LIMITS.typedDataDepth}`);
+  const names = Object.getOwnPropertyNames(value);
+  if (Object.getOwnPropertySymbols(value).length) badSign('typed data must contain only JSON values');
+  const own = (key) => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) badSign('typed data must contain only plain data properties');
+    return descriptor.value;
+  };
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype || names.length !== value.length + 1) badSign('typed data arrays must be dense plain arrays');
+    const out = [];
+    for (let i = 0; i < value.length; i++) {
+      if (!Object.hasOwn(value, i)) badSign('typed data arrays must be dense plain arrays');
+      out.push(jsonSafe(own(String(i)), budget, depth + 1));
+    }
+    return out;
+  }
+  if (!isPlainObject(value)) badSign('typed data must contain only plain objects');
+  const out = {};
+  for (const key of names) {
+    if (FORBIDDEN_KEYS.includes(key)) badSign('typed data must not use __proto__, prototype or constructor keys');
+    out[key] = jsonSafe(own(key), budget, depth + 1);
+  }
+  return out;
+}
+
+const exactKeys = (value, keys) => Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+const shortName = (value) => typeof value === 'string' && value.length > 0 && value.length <= LIMITS.typedDataNameChars;
+
+/** Structural EIP-712 checks on the normalized value. Anvil stays authoritative for type syntax and value encoding. */
+function checkTypedData(typedData, chainId) {
+  if (!isPlainObject(typedData) || !exactKeys(typedData, TYPED_DATA_KEYS)) badSign('typed data must have exactly types, primaryType, domain and message');
+  const { types, primaryType, domain, message } = typedData;
+  if (!isPlainObject(types)) badSign('typed data types must be an object');
+  const typeNames = Object.keys(types);
+  if (typeNames.length > LIMITS.typedDataTypes) badSign(`typed data defines more than ${LIMITS.typedDataTypes} types`);
+  for (const name of typeNames) {
+    if (!shortName(name)) badSign(`typed data type names must be 1-${LIMITS.typedDataNameChars} characters`);
+    const fields = types[name];
+    if (!Array.isArray(fields) || fields.length > LIMITS.typedDataFields) badSign(`typed data type definitions must be arrays of at most ${LIMITS.typedDataFields} fields`);
+    const seen = new Set();
+    for (const field of fields) {
+      if (!isPlainObject(field) || !exactKeys(field, ['name', 'type']) || !shortName(field.name) || !shortName(field.type)) {
+        badSign(`typed data fields must be exactly {name, type} with 1-${LIMITS.typedDataNameChars} character strings`);
+      }
+      if (seen.has(field.name)) badSign('typed data field names must be unique within a type');
+      seen.add(field.name);
+    }
+  }
+  if (!Object.hasOwn(types, 'EIP712Domain')) badSign('typed data types must define EIP712Domain');
+  if (typeof primaryType !== 'string' || primaryType === 'EIP712Domain' || !Object.hasOwn(types, primaryType)) {
+    badSign('typed data primaryType must name a defined type other than EIP712Domain');
+  }
+  if (!isPlainObject(domain)) badSign('typed data domain must be an object');
+  const domainKeys = Object.keys(domain);
+  if (!domainKeys.every((key) => Object.hasOwn(DOMAIN_FIELDS, key))) badSign('typed data domain allows only name, version, chainId, verifyingContract and salt');
+  const declared = types.EIP712Domain;
+  if (declared.length !== domainKeys.length || !declared.every((field) => Object.hasOwn(domain, field.name) && DOMAIN_FIELDS[field.name] === field.type)) {
+    badSign('typed data EIP712Domain fields must declare exactly the domain keys with their standard types');
+  }
+  if (!Object.hasOwn(domain, 'chainId')) badSign('typed data domain.chainId is required');
+  const id = domain.chainId;
+  const valid = (typeof id === 'number' && id >= 0) || (typeof id === 'string' && (DECIMAL.test(id) || QUANTITY.test(id)));
+  if (!valid) badSign('typed data domain.chainId must be a safe integer, decimal string or canonical hex quantity');
+  if (BigInt(id) !== BigInt(chainId)) badSign('typed data domain.chainId must equal the active chain');
+  for (const key of ['name', 'version']) if (Object.hasOwn(domain, key) && typeof domain[key] !== 'string') badSign(`typed data domain.${key} must be a string`);
+  if (Object.hasOwn(domain, 'verifyingContract') && (typeof domain.verifyingContract !== 'string' || !ADDRESS.test(domain.verifyingContract))) {
+    badSign('typed data domain.verifyingContract must be a 20-byte address');
+  }
+  if (Object.hasOwn(domain, 'salt') && (typeof domain.salt !== 'string' || !HASH.test(domain.salt))) badSign('typed data domain.salt must be 32 bytes');
+  if (!isPlainObject(message)) badSign('typed data message must be an object');
+}
+
+/**
+ * Validates exact personal_sign / eth_signTypedData_v4 params for the active account and chain and returns the
+ * deep-frozen SignatureRequest given to the policy and forwarded to the node. personal_sign: [0x bytes, address].
+ * eth_signTypedData_v4: [address, JSON text or plain object]; JSON text is parsed exactly once.
+ */
+function checkSignatureRequest(method, params, account, chainId) {
+  if (!SIGNING_METHODS.includes(method)) signFail(CODES.UNSUPPORTED_METHOD, 'unsupported signing method');
+  if (!Array.isArray(params) || params.length !== 2) badSign(`${method} expects exactly two params`);
+  if (method === 'personal_sign') {
+    const [message, who] = params;
+    if (typeof message !== 'string' || !BYTES.test(message)) badSign('personal_sign message must be even-length 0x hex bytes');
+    if ((message.length - 2) / 2 > LIMITS.signMessageBytes) badSign(`personal_sign message exceeds ${LIMITS.signMessageBytes} bytes`);
+    if (typeof who !== 'string' || !ADDRESS.test(who) || !same(who, account)) badSign('personal_sign address must be the active authorized account');
+    return deepFreeze({ method, account, message });
+  }
+  const [who, input] = params;
+  if (typeof who !== 'string' || !ADDRESS.test(who) || !same(who, account)) badSign('eth_signTypedData_v4 address must be the active authorized account');
+  let parsed = input;
+  if (typeof input === 'string') {
+    if (byteLength(input) > LIMITS.typedDataBytes) badSign(`typed data exceeds ${LIMITS.typedDataBytes} bytes`);
+    try { parsed = JSON.parse(input); } catch { badSign('typed data is not valid JSON'); }
+  } else if (!isPlainObject(input)) badSign('typed data must be a JSON string or a plain object');
+  const typedData = jsonSafe(parsed, { nodes: 0 }, 1);
+  if (byteLength(JSON.stringify(typedData)) > LIMITS.typedDataBytes) badSign(`typed data exceeds ${LIMITS.typedDataBytes} bytes`);
+  checkTypedData(typedData, chainId);
+  return deepFreeze({ method, account, typedData });
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // Loopback JSON-RPC client.
 
 async function readBounded(response, max) {
@@ -383,6 +535,16 @@ function createLoopbackRpc(endpoint, { timeoutMs = DEFAULT_TIMEOUT_MS, maxRespon
 
 const REGISTRATION_KEYS = ['endpoint', 'chainId', 'account', 'beforeSend'];
 
+/** `signing` option: absent disables both signing methods; present must be exactly {validateSignature}. */
+function makeSigning(value) {
+  if (value === undefined) return null;
+  if (!isPlainObject(value)) fail(CODES.INVALID_PARAMS, 'signing must be an object {validateSignature}');
+  const extra = Object.keys(value).filter((key) => key !== 'validateSignature');
+  if (extra.length) fail(CODES.INVALID_PARAMS, `signing has unsupported fields: ${extra.slice(0, 10).join(', ')}`);
+  if (typeof value.validateSignature !== 'function') fail(CODES.INVALID_PARAMS, 'signing.validateSignature(request) is mandatory');
+  return Object.freeze({ validateSignature: value.validateSignature });
+}
+
 function makeRegistration(entry, what, timeoutMs) {
   if (!isPlainObject(entry)) fail(CODES.INVALID_PARAMS, `${what} must be an object`);
   const extra = Object.keys(entry).filter((key) => !REGISTRATION_KEYS.includes(key));
@@ -459,6 +621,11 @@ async function installForkWallet(context, options) {
     if (registry.has(registration.chainId)) fail(CODES.INVALID_PARAMS, `chain ${registration.chainId} is registered twice`);
     registry.set(registration.chainId, registration);
   });
+  const signing = makeSigning(options.signing);
+  if (signing) {
+    const refused = [...registry.keys()].filter((id) => !SIGNING_CHAINS.includes(id));
+    if (refused.length) fail(CODES.INVALID_PARAMS, `signing is limited to local chain IDs 31337/31338; refusing ${refused.join(', ')}`);
+  }
 
   const info = Object.freeze({ uuid: crypto.randomUUID(), ...PROVIDER_INFO });
   const calls = [];
@@ -533,6 +700,10 @@ async function installForkWallet(context, options) {
   }
 
   function takeMode(method) {
+    // Signing never downgrades lost to approve: a global lost mode refuses it before admission, consuming nothing.
+    if (SIGNING_METHODS.includes(method) && mode === 'lost' && !overrides.some((o) => o.method === method)) {
+      signFail(CODES.INVALID_PARAMS, 'lost mode is not supported for signing');
+    }
     const index = overrides.findIndex((o) => o.method === method);
     const chosen = index >= 0 ? overrides.splice(index, 1)[0].mode : mode;
     return chosen === 'lost' && method !== 'eth_sendTransaction' ? 'approve' : chosen;
@@ -541,8 +712,9 @@ async function installForkWallet(context, options) {
   /**
    * One approval at a time. Admission is recorded before any dispatch; the decision (mode or held release) comes
    * next and `execute` runs the method-specific continuation. Failures settle the record unless already settled.
+   * `sanitize` (signing) maps every error to a constant message before it is recorded or thrown.
    */
-  async function runApproval(method, fields, execute) {
+  async function runApproval(method, fields, execute, sanitize = (error) => error) {
     if (outstanding) fail(CODES.REQUEST_PENDING, 'another approval request is outstanding');
     const record = {
       requestId: crypto.randomUUID(), method, epoch, origin, chainId: active.chainId, endpoint: active.endpoint,
@@ -568,7 +740,8 @@ async function installForkWallet(context, options) {
         fail(CODES.USER_REJECTED, 'user rejected the request');
       }
       return await execute(record, decision);
-    } catch (error) {
+    } catch (raw) {
+      const error = sanitize(raw);
       if (['admitted', 'held'].includes(record.outcome)) record.outcome = 'failed';
       if (!record.error) record.error = { code: codeOf(error), message: messageOf(error) };
       throw error;
@@ -641,6 +814,81 @@ async function installForkWallet(context, options) {
       record.outcome = 'submitted';
       return hash;
     });
+  }
+
+  /** Scope-change code for a request whose epoch moved: 4900 disconnect, 4901 chain switch, 4100 otherwise. */
+  function scopeCode() {
+    const code = lastScopeChange && lastScopeChange.code;
+    return code === CODES.DISCONNECTED || code === CODES.CHAIN_DISCONNECTED ? code : CODES.UNAUTHORIZED;
+  }
+
+  async function signaturePolicy(request) {
+    try { await signing.validateSignature(request); } catch { signFail(CODES.INTERNAL, 'signature refused by policy'); }
+  }
+
+  /**
+   * personal_sign / eth_signTypedData_v4 for the active authorized account, forwarded to the owned node's unlocked
+   * account. The record never holds the message, typed data or signature. No retry; ambiguity is 'unknown'.
+   */
+  async function signRequest(method, params) {
+    try {
+      if (!authorized) signFail(CODES.UNAUTHORIZED, `${method} requires an authorized account (eth_requestAccounts)`);
+      const request = checkSignatureRequest(method, params, activeAccount(), active.chainId);
+      if (mode === 'lost' && !overrides.some((o) => o.method === method)) signFail(CODES.INVALID_PARAMS, 'lost mode is not supported for signing');
+      const forward = method === 'personal_sign' ? [request.message, request.account] : [request.account, JSON.stringify(request.typedData)];
+      const fields = { inputHash: crypto.createHash('sha256').update(JSON.stringify(request)).digest('hex'), signatureReturned: false, delivered: false };
+      if (request.typedData) {
+        const { domain } = request.typedData;
+        fields.domain = { chainId: '0x' + BigInt(domain.chainId).toString(16) };
+        if (Object.hasOwn(domain, 'verifyingContract')) fields.domain.verifyingContract = domain.verifyingContract;
+      }
+      const admittedEpoch = epoch;
+      await signaturePolicy(request);
+      if (!connected) signFail(CODES.DISCONNECTED, 'wallet disconnected');
+      if (!authorized) signFail(CODES.UNAUTHORIZED, 'authorization changed during policy check');
+      if (epoch !== admittedEpoch) signFail(scopeCode(), 'scope changed during policy check');
+      return await runApproval(method, fields, async (record) => {
+        const chain = registry.get(record.chainId);
+        await preflight(chain, record.account);
+        assertLive(record);
+        await signaturePolicy(request);
+        assertLive(record);
+        record.outcome = 'dispatching';
+        record.dispatchedAt = new Date().toISOString();
+        let signature;
+        try {
+          signature = await chain.rpc(method, forward);
+        } catch (error) {
+          if (error && error.kind === 'upstream') {
+            // The node answered with an error: no signature. Its message/data may echo the payload and are dropped.
+            record.outcome = 'failed';
+            record.error = { code: error.code, message: 'node refused the signing request' };
+            signFail(error.code, 'node refused the signing request');
+          }
+          record.outcome = 'unknown';
+          record.error = { code: CODES.INTERNAL, message: 'signing outcome unknown: no usable node response' };
+          signFail(CODES.INTERNAL, 'signing outcome unknown: no usable node response');
+        }
+        if (typeof signature !== 'string' || !SIGNATURE.test(signature)) {
+          record.outcome = 'unknown';
+          record.error = { code: CODES.INTERNAL, message: 'signing outcome unknown: node returned no well-formed signature' };
+          signFail(CODES.INTERNAL, 'signing outcome unknown: node returned no well-formed signature');
+        }
+        record.signatureReturned = true;
+        // Synchronous recheck: a signature generated for an outdated scope is discarded, never delivered.
+        if (record.epoch !== epoch || !connected || !authorized || active.chainId !== record.chainId || !same(activeAccount(), record.account)) {
+          const code = scopeCode();
+          record.outcome = 'signed-discarded';
+          record.error = { code, message: 'scope changed after signing; signature discarded' };
+          signFail(code, 'scope changed after signing; signature discarded');
+        }
+        record.outcome = 'signed';
+        record.delivered = true;
+        return signature;
+      }, signingError);
+    } catch (error) {
+      throw signingError(error);
+    }
   }
 
   async function grant(method) {
@@ -731,6 +979,10 @@ async function installForkWallet(context, options) {
       recordUnsupported(method, 'unsupported-method');
       fail(CODES.UNSUPPORTED_METHOD, `unsupported method ${method.slice(0, 100)}`);
     }
+    if (SIGNING_METHODS.includes(method) && !signing) {
+      recordUnsupported(method, 'signing-disabled');
+      fail(CODES.UNSUPPORTED_METHOD, `${method} is disabled: install the wallet with a signing policy to enable it`);
+    }
     if (params !== undefined && !Array.isArray(params)) fail(CODES.INVALID_PARAMS, 'params must be an array');
     if (method === 'wallet_getPermissions') { noParams(method, params); return authorized ? [descriptor()] : []; }
     if (method === 'wallet_revokePermissions') { permissionRequest(params, method); await revokeAuthorization(); return null; }
@@ -744,6 +996,7 @@ async function installForkWallet(context, options) {
       case 'wallet_requestPermissions': permissionRequest(params, method); return grant(method);
       case 'wallet_switchEthereumChain': return switchRequest(params);
       case 'eth_sendTransaction': return sendTransaction(params);
+      case 'personal_sign': case 'eth_signTypedData_v4': return signRequest(method, params);
       default: return read(method, params);
     }
   }
@@ -770,6 +1023,7 @@ async function installForkWallet(context, options) {
     get account() { return activeAccount(); },
     get chains() { return [...registry.keys()]; },
     get mode() { return mode; },
+    get signing() { return Boolean(signing); },
     get connected() { return connected; },
     get authorized() { return authorized; },
     get epoch() { return epoch; },
@@ -782,6 +1036,7 @@ async function installForkWallet(context, options) {
     nextRequest({ method, mode: value } = {}) {
       if (!APPROVAL_METHODS.includes(method)) fail(CODES.INVALID_PARAMS, `nextRequest method must be one of ${APPROVAL_METHODS.join(', ')}`);
       if (!MODES.includes(value)) fail(CODES.INVALID_PARAMS, `unknown mode ${String(value)}`);
+      if (SIGNING_METHODS.includes(method) && !signing) fail(CODES.INVALID_PARAMS, `${method} is disabled: no signing policy installed`);
       if (value === 'lost' && method !== 'eth_sendTransaction') fail(CODES.INVALID_PARAMS, 'lost applies only to eth_sendTransaction');
       overrides.push(Object.freeze({ method, mode: value }));
     },
@@ -838,6 +1093,6 @@ async function installForkWallet(context, options) {
 
 module.exports = {
   installForkWallet, createLoopbackRpc, requireLoopbackEndpoint, requireOrigin, normalizeChainId, checkTransaction,
-  validateReadRequest, ForkWalletError, MODES, RELEASE_OUTCOMES, METHODS, READ_METHODS, WALLET_METHODS, APPROVAL_METHODS,
-  TRANSACTION_FIELDS, TRANSACTION_TYPES, STATES, CODES, LIMITS, PROVIDER_INFO,
+  checkSignatureRequest, validateReadRequest, ForkWalletError, MODES, RELEASE_OUTCOMES, METHODS, READ_METHODS, WALLET_METHODS,
+  APPROVAL_METHODS, SIGNING_METHODS, SIGNING_CHAINS, TRANSACTION_FIELDS, TRANSACTION_TYPES, STATES, CODES, LIMITS, PROVIDER_INFO,
 };

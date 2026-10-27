@@ -1,6 +1,9 @@
 export type Mode = 'approve' | 'reject' | 'hold' | 'lost';
 export type ReleaseOutcome = 'approve' | 'reject' | 'lost';
-export type ApprovalMethod = 'eth_requestAccounts' | 'wallet_requestPermissions' | 'wallet_switchEthereumChain' | 'eth_sendTransaction';
+/** Supported signing capability. Each install enables it only through InstallOptions.signing (absent: 4200). */
+export type SigningMethod = 'personal_sign' | 'eth_signTypedData_v4';
+export type ApprovalMethod = 'eth_requestAccounts' | 'wallet_requestPermissions' | 'wallet_switchEthereumChain' | 'eth_sendTransaction'
+  | SigningMethod;
 export type ReadMethod =
   | 'eth_chainId' | 'net_version' | 'eth_blockNumber' | 'eth_getBalance' | 'eth_getCode' | 'eth_getStorageAt'
   | 'eth_getTransactionCount' | 'eth_call' | 'eth_estimateGas' | 'eth_gasPrice' | 'eth_maxPriorityFeePerGas'
@@ -34,13 +37,53 @@ export interface Transaction {
 }
 
 /**
- * Request lifecycle state (0.2.0). Transactions: admitted → held? → dispatching → submitted | response-lost |
- * unknown | failed, or rejected / cancelled / failed before dispatch. Non-transaction approvals end in approved,
- * rejected, cancelled or failed. `unknown` means the node may have executed it; it is never proof of no send.
+ * Request lifecycle state (0.3.0). Transactions: admitted → held? → dispatching → submitted | response-lost |
+ * unknown | failed, or rejected / cancelled / failed before dispatch. Signing: admitted → held? → dispatching →
+ * signed | signed-discarded | unknown | failed, or rejected / cancelled / failed before dispatch. Other approvals end
+ * in approved, rejected, cancelled or failed. `unknown` means the node may have executed (or signed); it is never
+ * proof that nothing was sent or that no signature was generated.
  */
 export type CallState =
   | 'admitted' | 'held' | 'dispatching' | 'submitted' | 'rejected' | 'response-lost' | 'unknown' | 'failed'
-  | 'cancelled' | 'approved';
+  | 'cancelled' | 'approved' | 'signed' | 'signed-discarded';
+
+/** EIP-712 field definition: exactly {name, type}, 1-128 character strings. */
+export interface TypedDataField {
+  readonly name: string;
+  readonly type: string;
+}
+
+/** JSON-safe value after validation: numbers are safe integers only; large integers are decimal or hex strings. */
+export type TypedDataValue = string | number | boolean | null | readonly TypedDataValue[] | { readonly [key: string]: TypedDataValue };
+
+/** Normalized EIP-712 payload (exactly these four keys). Structure is checked locally; Anvil encodes and signs. */
+export interface TypedData {
+  readonly types: { readonly EIP712Domain: readonly TypedDataField[]; readonly [type: string]: readonly TypedDataField[] };
+  readonly primaryType: string;
+  readonly domain: {
+    readonly name?: string;
+    readonly version?: string;
+    /** Mandatory; must equal the active chain (safe integer, decimal string or canonical hex quantity). */
+    readonly chainId: number | string;
+    readonly verifyingContract?: string;
+    readonly salt?: string;
+  };
+  readonly message: { readonly [key: string]: TypedDataValue };
+}
+
+/**
+ * Deep-frozen request given to signing.validateSignature (twice: before admission and right before dispatch). It is
+ * exactly what is forwarded: personal_sign as [message, account], eth_signTypedData_v4 as [account, JSON.stringify(typedData)].
+ */
+export type SignatureRequest =
+  | { readonly method: 'personal_sign'; readonly account: string; /** Even-length 0x hex bytes, at most 65536 bytes. */ readonly message: string }
+  | { readonly method: 'eth_signTypedData_v4'; readonly account: string; readonly typedData: TypedData };
+
+/** Opt-in signing policy. Only for disposable local accounts on chains 31337/31338. */
+export interface SigningOptions {
+  /** Mandatory: throw to refuse. Thrown content is never returned to the page (fixed -32603 refusal). */
+  validateSignature(request: SignatureRequest): void | Promise<void>;
+}
 
 /** One admitted approval request. Field set is versioned with the package (0.2.0); see README migration. */
 export interface Call {
@@ -60,8 +103,17 @@ export interface Call {
   dispatchedAt?: string;
   /** eth_sendTransaction only. */
   transaction?: Transaction;
-  /** sha256 hex of the exact JSON the page sent as the transaction object. */
+  /**
+   * eth_sendTransaction: sha256 hex of the exact JSON the page sent as the transaction object. Signing: sha256 hex of
+   * JSON.stringify(SignatureRequest) (the normalized request).
+   */
   inputHash?: string;
+  /** eth_signTypedData_v4 only: domain summary (canonical hex chainId, verifyingContract when present). */
+  domain?: { chainId: string; verifyingContract?: string };
+  /** Signing only: a well-formed 65-byte signature was received from the node. */
+  signatureReturned?: boolean;
+  /** Signing only: the signature was returned to the caller. Never true for signed-discarded or unknown. */
+  delivered?: boolean;
   /** wallet_switchEthereumChain only. */
   target?: string;
   hash?: string;
@@ -75,7 +127,7 @@ export interface Call {
 
 export interface UnsupportedRecord {
   method: string;
-  reason: 'unsupported-method' | 'caller-frame';
+  reason: 'unsupported-method' | 'caller-frame' | 'signing-disabled';
   at: string;
 }
 
@@ -108,6 +160,11 @@ export interface InstallOptions {
   clientVersion?: RegExp;
   /** Per-RPC timeout, 1-15000. Default 15000. */
   timeoutMs?: number;
+  /**
+   * Opt-in personal_sign / eth_signTypedData_v4. Absent: both are 4200. Present: every configured chain must be 31337
+   * or 31338 (install fails otherwise) and the node account signs. Never pass a non-disposable key's account.
+   */
+  signing?: SigningOptions;
 }
 
 export interface ProviderInfo {
@@ -129,18 +186,29 @@ export interface ForkWallet {
   readonly account: string;
   readonly chains: string[];
   readonly mode: Mode;
+  /** True when installed with a signing policy. */
+  readonly signing: boolean;
   readonly connected: boolean;
   readonly authorized: boolean;
   readonly epoch: number;
   readonly held: boolean;
   readonly heldRequestId: string | null;
-  /** Default decision for approval requests. 'lost' applies to transactions only (others approve). */
+  /**
+   * Default decision for approval requests. 'lost' applies to transactions only: connection/permission/switch approve,
+   * and signing requests fail -32602 before policy or admission (signing has no lost mode).
+   */
   setMode(mode: Mode): void;
-  /** One-shot decision consumed by the next matching approval request; reads never consume it. */
+  /**
+   * One-shot decision consumed by the next matching approval request; reads never consume it. Signing methods need a
+   * signing policy and never accept 'lost' (-32602).
+   */
   nextRequest(next: { method: ApprovalMethod; mode: Mode }): void;
   /** Resolves with the held requestId (immediately if one is held). No timeout: race it with a deadline. */
   whenHeld(): Promise<string>;
-  /** Releases exactly the held request; a wrong ID, a second release or an invalidated request fails. */
+  /**
+   * Releases exactly the held request; a wrong ID, a second release or an invalidated request fails. 'lost' on a held
+   * non-transaction fails and leaves it held.
+   */
   release(requestId: string, outcome?: ReleaseOutcome): void;
   /** Clears the account permission, invalidates pending requests, emits accountsChanged([]). Not a disconnect. */
   revoke(): Promise<void>;
@@ -177,7 +245,11 @@ export const RELEASE_OUTCOMES: readonly ReleaseOutcome[];
 export const METHODS: readonly Method[];
 export const READ_METHODS: readonly ReadMethod[];
 export const WALLET_METHODS: readonly WalletMethod[];
+/** Static supported-capability list (includes signing methods); not a statement of enabled policy. */
 export const APPROVAL_METHODS: readonly ApprovalMethod[];
+export const SIGNING_METHODS: readonly SigningMethod[];
+/** Local chain IDs ('0x7a69', '0x7a6a') on which signing may be enabled. */
+export const SIGNING_CHAINS: readonly string[];
 export const TRANSACTION_FIELDS: readonly (keyof Transaction)[];
 export const TRANSACTION_TYPES: readonly ('0x0' | '0x1' | '0x2')[];
 export const STATES: readonly CallState[];
@@ -206,6 +278,13 @@ export const LIMITS: {
   readonly feeHistoryPercentiles: number;
   readonly accessListItems: number;
   readonly timeoutMs: number;
+  readonly signMessageBytes: number;
+  readonly typedDataBytes: number;
+  readonly typedDataDepth: number;
+  readonly typedDataNodes: number;
+  readonly typedDataTypes: number;
+  readonly typedDataFields: number;
+  readonly typedDataNameChars: number;
 };
 export const PROVIDER_INFO: { readonly name: string; readonly rdns: string; readonly icon: string };
 
@@ -217,5 +296,7 @@ export function requireLoopbackEndpoint(endpoint: string): string;
 export function requireOrigin(origin: string): string;
 export function normalizeChainId(chainId: number | string): string;
 export function checkTransaction(params: unknown, account: string, chainId: string): Transaction;
+/** Validates exact signing params for `account` on `chainId` and returns the deep-frozen SignatureRequest. */
+export function checkSignatureRequest(method: string, params: unknown, account: string, chainId: string): SignatureRequest;
 /** Validates an allowlisted read and returns fresh bounded params (eth_getLogs tags resolved through `rpc`). */
 export function validateReadRequest(method: string, params: unknown, rpc: Rpc): Promise<unknown[]>;
