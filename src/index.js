@@ -583,8 +583,28 @@ function pageScript({ origin: allowed, info }) {
       }
       return reply.result;
     },
+    // Legacy alias of eth_requestAccounts: same handler, permission state machine and error shaping. Not an RPC method.
+    // Closes over provider (no dynamic this) so an extracted call works; any argument (even undefined) is refused.
+    async enable(...args) {
+      if (args.length !== 0) {
+        const error = new Error('enable takes no arguments');
+        error.code = -32602; // page-side literal: CODES is Node-only
+        throw error;
+      }
+      return provider.request({ method: 'eth_requestAccounts' });
+    },
   };
   provider.off = provider.removeListener;
+  // Legacy dApps assign autoRefreshOnNetworkChange = false during render. A false-only accessor lets that strict-mode
+  // write succeed on the frozen provider without holding state; any other value throws (no coercion, no side effects).
+  Object.defineProperty(provider, 'autoRefreshOnNetworkChange', {
+    enumerable: false,
+    configurable: false,
+    get() { return false; },
+    set(value) {
+      if (value !== false) throw new TypeError('autoRefreshOnNetworkChange only accepts false');
+    },
+  });
   Object.freeze(provider);
   const detail = Object.freeze({ info: Object.freeze({ ...info }), provider });
   const announce = () => window.dispatchEvent(new CustomEvent('eip6963:announceProvider', { detail }));

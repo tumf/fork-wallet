@@ -243,12 +243,32 @@ install (one origin), shared across pages and reloads; a fresh context starts un
 
 ### Page provider and EIP-6963
 
-`window.ethereum` is a frozen object with `request`, `on`, `removeListener`, `off` and `isForkWallet: true` (no
-`isMetaMask`). Errors carry `code`, `message` and, when present, `data`. The same object is announced with
+`window.ethereum` is a frozen object with `request`, `on`, `removeListener`, `off`, `isForkWallet: true` and the two
+[legacy members](#legacy-surface-exactly-two-members) `enable` and `autoRefreshOnNetworkChange` (no `isMetaMask`). Errors carry `code`, `message` and, when present, `data`. The same object is announced with
 `eip6963:announceProvider` during initialization and on every `eip6963:requestProvider`, with frozen info
 `{uuid (UUIDv4, stable per install), name: 'Fork Wallet', rdns: 'dev.forkwallet.test', icon: <constant data: SVG>}`.
 `connect({chainId})` is emitted once per page initialization (after the announce, in a microtask once the provider
 state is known) and after `reconnect()`; never per request.
+
+#### Legacy surface (exactly two members)
+
+Older dApps (for example web3modal 1.x-era code) touch two pre-EIP-1193 members. The provider stays frozen and adds
+only these:
+
+- `autoRefreshOnNetworkChange`: an own, non-enumerable, non-configurable accessor. Reading returns `false`. Assigning
+  primitive `false` succeeds (also in strict mode) and changes nothing; any other value (`true`, `undefined`, `null`,
+  `0`, strings, objects, …) throws `TypeError` synchronously without coercing it. It calls no binding, emits no event
+  and cannot be redefined or deleted. `Object.isFrozen(window.ethereum)` stays `true`.
+- `enable()`: returns `request({method: 'eth_requestAccounts'})` and nothing else. It goes through the same
+  main-frame/exact-origin check, approval (`setMode` / `nextRequest({method: 'eth_requestAccounts', ...})` / hold /
+  release), epoch invalidation and error shaping (`code`, `message`, `data`), and is recorded in `calls` as
+  `eth_requestAccounts`. Any argument, including an explicit `undefined`, rejects -32602 before reaching Node. It works
+  when extracted (`const {enable} = window.ethereum`). It grants account access only: sending and signing keep their
+  own approvals and the signing opt-in. `request({method: 'enable'})` is still 4200; `enable` is not an RPC method.
+
+Other legacy members stay absent: no `send`, `sendAsync`, `isMetaMask`, `selectedAddress`, `chainId` or
+`networkVersion` property, and no other property can be added. Verified only with a synthetic strict-mode fixture
+(`npm run test:legacy`); this is **not** a claim that any third-party app (Uniswapper, web3modal) works end to end.
 
 ### Error codes
 
@@ -369,9 +389,10 @@ test runner) are served without CORS headers.
 
 | Command | What it covers | Needs |
 | --- | --- | --- |
-| `npm test` | `test/unit.test.js`, `test/provider.test.js`, `test/signing.test.js`: option/request/frame refusals, transaction and read schemas, RPC integrity and bounds, preflight, modes, permissions, registered chains, epochs and late policy races, outcomes, events, page provider and EIP-6963 in a VM; signing opt-in, exact input bounds, handle order, approvals, pre/post-dispatch scope races and sentinel redaction (synthetic stub results, labelled as such; not cryptographic evidence). In-memory doubles only (stubbed `fetch`, fake context). | Node |
+| `npm test` | `test/unit.test.js`, `test/provider.test.js`, `test/signing.test.js`, `test/legacy-provider.test.js`: option/request/frame refusals, transaction and read schemas, RPC integrity and bounds, preflight, modes, permissions, registered chains, epochs and late policy races, outcomes, events, page provider and EIP-6963 in a VM; the legacy `autoRefreshOnNetworkChange` / `enable()` surface on the actual serialized page script bound to the real request handler; signing opt-in, exact input bounds, handle order, approvals, pre/post-dispatch scope races and sentinel redaction (synthetic stub results, labelled as such; not cryptographic evidence). In-memory doubles only (stubbed `fetch`, fake context). | Node |
 | `npm run test:sdk` | Bounded runner (`test/run-gate.js`, 180 s total) for `test/anvil.test.js` (owned lifecycle, fake-binary failures, foreign listener, gateway rules), `test/sdk-compat.test.js` (real Chromium + bundled ethers/viem/wagmi-core on two owned chains, receipts and state, revert data, logs, lost/fallback, switch, reload/reconnect, negative routing; signing stays 4200 there), `test/signing-compat.test.js` (own policy-enabled context: ethers/viem/wagmi-core sign both methods, ethers and viem recover in-page, refusals and races with dispatch counters, read gateway refusal, redaction of the evidence file) and `test/integration.test.js` (generic dApp regression). Evidence: `artifacts/sdk/<ts>/evidence.json`, `artifacts/signing/<ts>/evidence.json`, `artifacts/local-anvil/<ts>/`. | Anvil 1.8.3, Playwright Chromium (`PLAYWRIGHT_BROWSERS_PATH` honoured), `lsof` |
 | `npm run test:integration` | Only the generic dApp regression, same bounded runner. | same |
+| `npm run test:legacy` | Same bounded runner (separate from `test:sdk`) for `test/legacy-compat.test.js`: real Chromium runs the injected provider against a synthetic strict-module legacy API fixture (`test/fixtures/legacy-api`, not a third-party app) on one owned vanilla Anvil 31337. Strict render write, refused writes, `enable()` reject then connect, read-gateway agreement, one policy-approved native transfer checked by receipt, balances and nonce, then revoke with no new submission; external HTTP/WS blocked and owned listeners verified retired. | Anvil 1.8.3, Playwright Chromium, `lsof` |
 | `npm run test:pack` | `npm pack`, install into a throwaway consumer outside the repo, load `fork-wallet` and `fork-wallet/anvil` from CJS and ESM, check that private paths are not exported, that there are no runtime dependencies and that signing is default-disabled and opt-in through the installed exports. | Node, npm |
 | `npm run test:aave:logic` | Example only (`examples/aave/selfcheck.js`): Aave acceptance policy/receipt logic, outcome and exit-status matrix, redaction/runner/pin sentinels and a real local redirect-denial control in headless Chromium (loopback only). | Node, Playwright Chromium, pinned Aave checkout (`AAVE_DIR`) |
 | `npm run test:aave` | Example only (`examples/aave/gate.js` around `examples/aave/harness.js`): unchanged pinned Aave UI supplies ETH and withdraws WETH on an owned Base fork. The harness exits 0 PASS, 4 DEGRADED, 2 FAILED or 3 BLOCKED. The gate turns 4 into exit 0 (`DEGRADED-ACCEPTED`, not a clean PASS) only after inspecting the evidence; 2/3 propagate. See [examples/aave/README.md](examples/aave/README.md). | macOS `sandbox-exec`, Anvil 1.8.3, Playwright Chromium, pinned Aave checkout, public Base read RPC |
