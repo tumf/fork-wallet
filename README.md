@@ -11,7 +11,7 @@ need an automated wallet with approve / reject / hold / lost / disconnect behavi
 ## Quickstart
 
 ```sh
-npm install --save-dev ./fork-wallet-0.1.0.tgz   # local tarball; the package is not published
+npm install --save-dev ./fork-wallet-0.1.1.tgz   # local tarball; the package is not published
 ```
 
 ```js
@@ -42,7 +42,7 @@ wallet.setMode('approve');                    // next send is submitted and the 
 console.log(wallet.submitted);                // real transaction hashes on your node
 ```
 
-The runnable example `test/integration.test.js` starts a vanilla Anvil (chain 31337), serves the generic dApp in
+The repository-only runnable example `test/integration.test.js` starts a vanilla Anvil (chain 31337), serves the generic dApp in
 `examples/local-anvil/dapp/` from an ephemeral loopback HTTP server and asserts receipts, balances and nonces for
 every mode. Run it with `npm run test:integration` (requires `anvil`, Playwright Chromium and `lsof`).
 
@@ -101,8 +101,11 @@ force at admission is what the request follows; changing the mode later does not
 - `submitted`: every hash the node returned, including `lost` ones.
 - `mode`, `connected`, `held`, `chainId`, `account`: current state.
 - `setMode(mode)`, `whenHeld()` (resolves when a request is held), `release(outcome)`.
+  `whenHeld()` has no timeout: race it with your request result and a bounded test deadline, because admission may fail.
+  A release clears `held` synchronously; a second release fails.
 - `disconnect()`: later requests fail with 4900 (`eth_accounts` returns `[]`), a held request fails with 4900 without
-  submission, and `accountsChanged([])` then `disconnect({code: 4900})` are emitted to every open same-origin page.
+  submission, and `accountsChanged([])` then `disconnect({code: 4900})` are attempted on same-origin pages initialized
+  after installation. Closed or navigating pages cannot prevent delivery to the remaining pages.
 
 ### Page provider
 
@@ -134,7 +137,7 @@ Node-side exports: `createLoopbackRpc(endpoint)`, `requireLoopbackEndpoint`, `re
   `data` and `value` are acceptable is entirely your validator's decision. An empty validator means any well-formed
   transaction to any address is submitted on your node.
 - **RPC integrity** is checked per response (HTTP 2xx, no redirects, JSON-RPC 2.0, matching id, exactly one of
-  result/error, 64-byte hash), always on `127.0.0.1` over plain HTTP. The endpoint is not authenticated; anything
+  result/error, 32-byte hash), always on `127.0.0.1` over plain HTTP. The endpoint is not authenticated; anything
   that can reach your loopback port can also reach it.
 - **No keys, no signing.** The node's unlocked account signs. Nothing here exports or imports private keys and no
   message signing method exists. Anvil's default dev accounts are public knowledge; never fund them on a real chain.
@@ -142,6 +145,11 @@ Node-side exports: `createLoopbackRpc(endpoint)`, `requireLoopbackEndpoint`, `re
   network at a pinned block is your harness's responsibility, as is reverting snapshots and stopping the child.
 - **Single account, single chain, single wallet per context.** No account switching, chain switching or multiple
   injected providers.
+- **Ambiguous submission.** A transport timeout, malformed response or `failed` outcome is not proof of no send.
+  Do not retry blindly: reconcile sender nonce and transactions on the node, even when `submitted` has no hash.
+- **Library compatibility.** Only the four listed methods and transaction fields are supported. Libraries that
+  estimate gas or add fee/nonce fields (including default ethers BrowserProvider send paths) need an adapter;
+  general ethers/viem compatibility is not claimed.
 - **Lost-response reconciliation** is the harness's job: compare `wallet.submitted` with the node (`eth_getTransactionReceipt`,
   `eth_getTransactionCount`) to prove no duplicate.
 - Node >= 22 (global `fetch`, `AbortSignal.timeout`, `structuredClone`). No runtime dependencies. Playwright is an
@@ -161,6 +169,6 @@ Missing tools are failures, never skips.
 
 `npm pack` produces `fork-wallet-<version>.tgz` containing `src/index.js`, `index.d.ts`, `README.md` and
 `package.json`. The package is `private` and `UNLICENSED`: it is a local release candidate for consumption as a
-pinned tarball (`"fork-wallet": "file:path/to/fork-wallet-0.1.0.tgz"`), not for publication. Consumers should record
+pinned tarball (`"fork-wallet": "file:path/to/fork-wallet-0.1.1.tgz"`), not for publication. Consumers should record
 the tarball SHA-256 and the installed `src/index.js` SHA-256 in their evidence.
 

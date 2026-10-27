@@ -161,7 +161,6 @@ async function installForkWallet(context, options) {
           release = resolve;
           for (const waiter of holdWaiters.splice(0)) waiter();
         });
-        release = null;
         if (!connected) fail(CODES.DISCONNECTED, 'wallet disconnected while held');
       }
       if (outcome === 'reject') fail(CODES.USER_REJECTED, 'user rejected the request');
@@ -244,9 +243,9 @@ async function installForkWallet(context, options) {
 
   async function emit(name, payload) {
     const pages = typeof context.pages === 'function' ? context.pages() : [];
-    await Promise.all(pages
+    await Promise.allSettled(pages
       .filter((page) => { try { return new URL(page.url()).origin === origin; } catch { return false; } })
-      .map((page) => page.evaluate(([n, p]) => window.__forkWalletEmit(n, p), [name, payload])));
+      .map((page) => page.evaluate(([n, p]) => window.__forkWalletEmit?.(n, p), [name, payload])));
   }
 
   return {
@@ -264,11 +263,17 @@ async function installForkWallet(context, options) {
     release(outcome = 'approve') {
       if (!RELEASE_OUTCOMES.includes(outcome)) fail(CODES.INVALID_PARAMS, `unknown release outcome ${String(outcome)}`);
       if (!release) fail(CODES.INTERNAL, 'no held request');
-      release(outcome);
+      const resolve = release;
+      release = null;
+      resolve(outcome);
     },
     async disconnect() {
       connected = false;
-      if (release) release('reject'); // the held request observes the disconnect and fails with 4900
+      if (release) {
+        const resolve = release;
+        release = null;
+        resolve('reject'); // the held request observes the disconnect and fails with 4900
+      }
       await emit('accountsChanged', []);
       await emit('disconnect', { code: CODES.DISCONNECTED, message: 'wallet disconnected' });
     },

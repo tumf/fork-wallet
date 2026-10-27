@@ -196,6 +196,8 @@ test('modes: approve, reject, lost, hold with concurrency, cancellation, release
   assert.equal((await send()).error.code, CODES.REQUEST_PENDING);
   assert.equal(node.sends, 2);
   w.release('reject');
+  assert.equal(w.held, false, 'release clears the hold synchronously');
+  assert.throws(() => w.release('approve'), (e) => e.code === CODES.INTERNAL);
   assert.equal((await first).error.code, CODES.USER_REJECTED);
   assert.equal(w.held, false);
   assert.equal(node.sends, 2);
@@ -234,7 +236,8 @@ test('disconnect: held request fails 4900, later sends refused, events reach onl
   const node = await startNode(t);
   const emitted = [];
   const page = (url) => ({ url: () => url, evaluate: async (fn, arg) => { emitted.push([url, arg]); } });
-  const ctx = fakeContext([page(origin + '/app'), page('http://127.0.0.1:9/other'), page('about:blank')]);
+  const closingPage = { url: () => origin + '/closing', evaluate: async () => { throw new Error('page closed'); } };
+  const ctx = fakeContext([closingPage, page(origin + '/app'), page('http://127.0.0.1:9/other'), page('about:blank')]);
   const w = await installForkWallet(ctx, baseOptions(node));
   w.setMode('hold');
   const pending = ctx.request('eth_sendTransaction', [tx]);

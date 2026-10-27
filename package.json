@@ -1,6 +1,6 @@
 {
   "name": "fork-wallet",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Test-only EIP-1193 wallet for Playwright that submits real transactions through your own loopback Anvil node",
   "license": "UNLICENSED",
   "private": true,
