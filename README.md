@@ -358,6 +358,10 @@ test runner) are served without CORS headers.
 - **Anvil accounts are disposable.** `startAnvil` uses `--mnemonic-random`; never fund such accounts on a real chain.
 - **Ambiguous submission.** `unknown` and transport failures are not proof of no send, and for signing not proof that
   no signature was generated. Reconcile on the node before retrying.
+- **The Aave example is one measured lending flow, not general dApp support.** `examples/aave` proves supply of 0.5 ETH
+  and withdrawal of 0.1 WETH through the unchanged, pinned Aave interface on an owned Base fork (macOS only). The
+  UI's native-ETH withdrawal needs an unlimited approval and stays blocked. Swaps, borrowing, SIWE, permits,
+  other dApps, real keys and production use are not covered, and distribution/user integration is separate work.
 - Node >= 22. No runtime dependencies. Playwright is an optional peer (>= 1.40). `lsof` is required by
   `fork-wallet/anvil`. macOS is the executed platform; Linux portability is not certified.
 
@@ -369,8 +373,11 @@ test runner) are served without CORS headers.
 | `npm run test:sdk` | Bounded runner (`test/run-gate.js`, 180 s total) for `test/anvil.test.js` (owned lifecycle, fake-binary failures, foreign listener, gateway rules), `test/sdk-compat.test.js` (real Chromium + bundled ethers/viem/wagmi-core on two owned chains, receipts and state, revert data, logs, lost/fallback, switch, reload/reconnect, negative routing; signing stays 4200 there), `test/signing-compat.test.js` (own policy-enabled context: ethers/viem/wagmi-core sign both methods, ethers and viem recover in-page, refusals and races with dispatch counters, read gateway refusal, redaction of the evidence file) and `test/integration.test.js` (generic dApp regression). Evidence: `artifacts/sdk/<ts>/evidence.json`, `artifacts/signing/<ts>/evidence.json`, `artifacts/local-anvil/<ts>/`. | Anvil 1.8.3, Playwright Chromium (`PLAYWRIGHT_BROWSERS_PATH` honoured), `lsof` |
 | `npm run test:integration` | Only the generic dApp regression, same bounded runner. | same |
 | `npm run test:pack` | `npm pack`, install into a throwaway consumer outside the repo, load `fork-wallet` and `fork-wallet/anvil` from CJS and ESM, check that private paths are not exported, that there are no runtime dependencies and that signing is default-disabled and opt-in through the installed exports. | Node, npm |
+| `npm run test:aave:logic` | Example only (`examples/aave/selfcheck.js`): Aave acceptance policy/receipt logic, outcome and exit-status matrix, redaction/runner/pin sentinels and a real local redirect-denial control in headless Chromium (loopback only). | Node, Playwright Chromium, pinned Aave checkout (`AAVE_DIR`) |
+| `npm run test:aave` | Example only (`examples/aave/gate.js` around `examples/aave/harness.js`): unchanged pinned Aave UI supplies ETH and withdraws WETH on an owned Base fork. The harness exits 0 PASS, 4 DEGRADED, 2 FAILED or 3 BLOCKED. The gate turns 4 into exit 0 (`DEGRADED-ACCEPTED`, not a clean PASS) only after inspecting the evidence; 2/3 propagate. See [examples/aave/README.md](examples/aave/README.md). | macOS `sandbox-exec`, Anvil 1.8.3, Playwright Chromium, pinned Aave checkout, public Base read RPC |
 
-Missing tools are failures, never skips. No test contacts anything beyond 127.0.0.1.
+Missing tools are failures, never skips. Apart from `npm run test:aave` (its Anvil fork and one `eth_blockNumber` read
+`https://mainnet.base.org`), no test contacts anything beyond 127.0.0.1.
 
 ## Packaging
 

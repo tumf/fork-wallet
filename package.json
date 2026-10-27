@@ -32,7 +32,10 @@
     "test:sdk": "node test/run-gate.js test/anvil.test.js test/sdk-compat.test.js test/signing-compat.test.js test/integration.test.js",
     "test:integration": "node test/run-gate.js test/integration.test.js",
     "test:all": "npm test && npm run test:sdk",
-    "test:pack": "node test/pack-consumer.js"
+    "test:pack": "node test/pack-consumer.js",
+    "test:aave:logic": "node examples/aave/selfcheck.js",
+    "test:aave": "node examples/aave/gate.js",
+    "test:aave:harness": "node examples/aave/harness.js"
   },
   "peerDependencies": {
     "playwright": ">=1.40"
