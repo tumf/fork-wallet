@@ -20,4 +20,4 @@ The example SHALL separate diagnostic degradation from runtime acceptance failur
 
 #### Scenario: Proxy redirect attempts to escape allowlist
 - **WHEN** an allowed local server returns a redirect to a disallowed destination
-- **THEN** proxy fetch does not follow and the browser's redirected request is blocked with zero destination requests
+- **THEN** proxy fetch does not follow it automatically, the redirect hop is re-checked against the allowlist and blocked, and the destination receives zero requests
