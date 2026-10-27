@@ -17,6 +17,12 @@ if (!window.ethereum) {
   window.ethereum.on('accountsChanged', (accounts) => {
     log('accountsChanged ' + JSON.stringify(accounts));
     if (!accounts.length) setConnected(false);
+    else if (account) { account = accounts[0]; $('account').textContent = account; }
+  });
+  window.ethereum.on('connect', async (info) => {
+    log('connect ' + info.chainId);
+    const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+    if (accounts.length) { account = accounts[0]; $('account').textContent = account; setConnected(true); }
   });
   window.ethereum.on('disconnect', (error) => {
     log('disconnect ' + error.code);

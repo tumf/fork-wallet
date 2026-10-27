@@ -1,0 +1,20 @@
+{
+  "explanation": "Hand-assembled by test/fixtures/probe-contract.js; see the opcode listing there. Not compiled Solidity.",
+  "abi": [
+    "function value() view returns (uint256)",
+    "function fail() view",
+    "function ping(uint256 x)",
+    "error Nope(uint256 code)",
+    "event Pinged(address indexed sender, uint256 x)"
+  ],
+  "selectors": {
+    "value": "3fa4f245",
+    "fail": "a9cc4718",
+    "ping": "773acdef",
+    "Nope": "63a2a81f"
+  },
+  "pingedTopic": "0x78a327424158f99dcde9deeb550e97c0f1d53b23ebaec3ac54a53f58504b3c85",
+  "initcode": "0x607c600c600039607c6000f360003560e01c80633fa4f245146028578063a9cc4718146033578063773acdef14604957600080fd5b602a60005260206000f35b6363a2a81f60e01b600052600760045260246000fd5b60043580600055600052337f78a327424158f99dcde9deeb550e97c0f1d53b23ebaec3ac54a53f58504b3c8560206000a200",
+  "runtime": "0x60003560e01c80633fa4f245146028578063a9cc4718146033578063773acdef14604957600080fd5b602a60005260206000f35b6363a2a81f60e01b600052600760045260246000fd5b60043580600055600052337f78a327424158f99dcde9deeb550e97c0f1d53b23ebaec3ac54a53f58504b3c8560206000a200",
+  "runtimeKeccak": "0x38fd566f503edacb598ca6fd01a5129638cd43ce8060395b9e5ac2e0ce712015"
+}
