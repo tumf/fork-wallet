@@ -17,7 +17,7 @@ try {
   const [packed] = JSON.parse(npm(['pack', '--json', '--pack-destination', packDir], ROOT));
   const tarball = path.join(packDir, packed.filename);
   const files = packed.files.map((f) => f.path).sort();
-  assert.deepEqual(files, ['README.md', 'index.d.ts', 'package.json', 'src/index.js'], 'tarball contents');
+  assert.deepEqual(files, ['LICENSE', 'README.md', 'index.d.ts', 'package.json', 'src/index.js'], 'tarball contents');
   const listing = execFileSync('tar', ['-tzf', tarball], { encoding: 'utf8' });
   assert.ok(!/\/Users\/|\/home\//.test(fs.readFileSync(path.join(ROOT, 'src/index.js'), 'utf8')), 'no absolute paths in source');
   assert.ok(listing.split('\n').filter(Boolean).every((entry) => entry.startsWith('package/')));
