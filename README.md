@@ -11,8 +11,7 @@ need an automated wallet with approve / reject / hold / lost / disconnect behavi
 ## Quickstart
 
 ```sh
-npm install --save-dev github:tumf/fork-wallet#v0.1.1
-# npm install --save-dev fork-wallet  # after publication on npm
+npm install --save-dev fork-wallet@0.1.1
 ```
 
 ```js
@@ -169,7 +168,7 @@ Missing tools are failures, never skips.
 ## Packaging
 
 `npm pack` produces `fork-wallet-<version>.tgz` containing `src/index.js`, `index.d.ts`, `README.md`,
-`LICENSE` and `package.json`. Version 0.1.1 is available from the tagged GitHub repository; npm publication
-is separate. Consumers can pin the Git tag and lockfile. Tests that require archive evidence should record the
-tarball SHA-256 and the installed `src/index.js` SHA-256.
+`LICENSE` and `package.json`. Version 0.1.1 is published on npm and tagged on GitHub. Consumers can pin
+the npm version and lockfile. Tests that require archive evidence should record the tarball SHA-256 and the
+installed `src/index.js` SHA-256.
 
