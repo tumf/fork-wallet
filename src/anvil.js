@@ -100,10 +100,16 @@ function readBody(req, max) {
 /** 413 without reading the body into memory: discard at most a bounded tail so the client sees the status, then close. */
 function tooLarge(req, res, headers) {
   res.writeHead(413, { ...headers, Connection: 'close' });
-  res.end();
+  res.flushHeaders();
+  // Let an in-flight upload finish before closing, or Node 22 fetch can see EPIPE instead of 413.
+  const timer = setTimeout(() => req.destroy(), 1000);
+  timer.unref();
+  res.once('close', () => clearTimeout(timer));
   let discarded = 0;
   req.on('data', (chunk) => { discarded += chunk.length; if (discarded > 4 * LIMITS.requestBytes) req.destroy(); });
-  req.resume();
+  req.once('end', () => res.end());
+  if (req.readableEnded) res.end();
+  else req.resume();
 }
 
 const rpcError = (id, code, message, data) => {

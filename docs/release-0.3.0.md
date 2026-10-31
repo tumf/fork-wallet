@@ -10,9 +10,9 @@ Status: prepared and tested on macOS; **not published to npm**. npm latest remai
 - Frozen legacy provider compatibility (`enable`, `autoRefreshOnNetworkChange`).
 - Consumer quickstart, API reference, MIT license and official npm publish configuration.
 
-This candidate integrates the latest development history and the existing public main history. Runtime source and
-public declarations are unchanged from development commit `2ec35f0`; release changes reconcile docs, licensing,
-registry metadata, package contents and a timeout test double. Existing unrelated worktrees are preserved.
+This candidate integrates the latest development history and the existing public main history. Public declarations and core provider source match development commit `2ec35f0`. Release changes reconcile docs,
+licensing, registry metadata, package contents and a timeout test double. The Anvil read gateway additionally fixes
+HTTP 413 delivery during in-flight uploads on Node 22, with bounded draining and an incomplete-upload regression. Existing unrelated worktrees are preserved.
 
 ## Executed verification (2026-10-31, mini/macOS)
 

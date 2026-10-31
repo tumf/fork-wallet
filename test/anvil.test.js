@@ -178,6 +178,16 @@ test('read gateway on real Anvil: path/method/CORS/content-type/size/batch rules
     req.end();
   });
   assert.equal(chunked, 413, 'streamed body without Content-Length is bounded too');
+  await new Promise((resolve, reject) => {
+    const req = http.request(url, { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': LIMITS.requestBytes + 1 } }, (res) => {
+      assert.equal(res.statusCode, 413);
+      res.on('error', () => {}); // An incomplete upload is deliberately closed after the bounded drain window.
+      res.once('close', resolve);
+    });
+    req.on('error', reject);
+    req.setTimeout(3000, () => { req.destroy(); reject(new Error('oversized incomplete upload did not close')); });
+    req.flushHeaders();
+  });
   assert.deepEqual((await post(url, '{not json')).body.error.code, -32700);
   assert.equal((await post(url, [])).body.error.code, CODES.INVALID_REQUEST);
   assert.equal((await post(url, Array.from({ length: 21 }, (_, id) => ({ jsonrpc: '2.0', id, method: 'eth_chainId' })))).body.error.code, CODES.INVALID_REQUEST);
