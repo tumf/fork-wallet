@@ -42,7 +42,15 @@ function createNode(nodes, { chain = chainId, accounts = [account, other] } = {}
       node.requests.push({ method: q.method, params: q.params });
       if (node.gate && q.method === node.gate.method) await node.gate.promise;
       if (node.hangOn === q.method) {
-        return new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true }));
+        return new Promise((_, reject) => {
+          if (init.signal.aborted) { reject(init.signal.reason); return; }
+          // Like real fetch's socket, keep Node alive until the timeout aborts this request.
+          const alive = setInterval(() => {}, 1000);
+          init.signal.addEventListener('abort', () => {
+            clearInterval(alive);
+            reject(init.signal.reason);
+          }, { once: true });
+        });
       }
       if (node.redirect) throw new TypeError('fetch failed: unexpected redirect');
       if (node.nonJSON) return new Response('not json', { status: 200 });

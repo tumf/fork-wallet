@@ -229,6 +229,10 @@ test('RPC client: integrity, bounded responses, timeouts and upstream error data
   const nodes = installFetch(t);
   const node = createNode(nodes);
   const rpc = createLoopbackRpc(node.endpoint, { timeoutMs: 50 });
+  node.hangOn = 'eth_chainId';
+  const reason = new Error('already aborted');
+  await assert.rejects(node.serve({ body: JSON.stringify({ method: 'eth_chainId' }), signal: AbortSignal.abort(reason) }), (e) => e === reason);
+  node.hangOn = null;
   assert.equal(await rpc('eth_chainId'), chainId);
   const kind = async (label, mutate, restore, expected) => {
     mutate();
