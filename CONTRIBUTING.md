@@ -65,12 +65,11 @@ Missing tools are failures, never skips. Apart from `npm run test:aave` (its Anv
 
 ## Packaging and release boundaries
 
-This checkout is the **0.3.0 release candidate**, licensed under **MIT** (see [LICENSE](LICENSE)).
-The npm registry still serves 0.1.1 until the owner explicitly approves publication of 0.3.0.
-Updating GitHub `main` or producing an archive is not an npm release.
+Version **0.3.0** is licensed under **MIT** (see [LICENSE](LICENSE)). See the
+[release checks and limitations](docs/release-0.3.0.md) for the verified scope.
 
-`npm pack` builds a local archive from the current checkout. The package is publishable, but `npm publish`
-requires a separate owner instruction. Its registry must be `https://registry.npmjs.org/`.
+`npm pack` builds a local archive from the current checkout; it does not publish a package.
+Use the published npm version for consumer installation and pin it in a lockfile.
 The archive includes runtime source, public declarations, README, LICENSE, the API reference and this contributor guide.
 Tests, examples, execution reports and OpenSpec files are repository-only; links to those paths require a repository
 checkout. Check the manifest with `npm pack --dry-run --json`.

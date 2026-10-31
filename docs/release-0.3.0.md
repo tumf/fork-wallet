@@ -1,6 +1,7 @@
-# 0.3.0 release candidate
+# 0.3.0 release notes
 
-Status: prepared and tested on macOS; **not published to npm**. npm latest remains 0.1.1.
+Version 0.3.0 was prepared and tested on macOS. Install the released package with
+`npm install --save-dev fork-wallet@0.3.0`. This file records the pre-publication checks and their limits.
 
 ## Changes since 0.1.1
 
@@ -10,7 +11,7 @@ Status: prepared and tested on macOS; **not published to npm**. npm latest remai
 - Frozen legacy provider compatibility (`enable`, `autoRefreshOnNetworkChange`).
 - Consumer quickstart, API reference, MIT license and official npm publish configuration.
 
-This candidate integrates the latest development history and the existing public main history. Public declarations match development commit `2ec35f0`. Release changes reconcile docs,
+This release integrates the latest development history and the existing public main history. Public declarations match development commit `2ec35f0`. Release changes reconcile docs,
 licensing, registry metadata, package contents and a timeout test double. Review fixes revalidate the caller frame
 before approval/dispatch and signature delivery, cancel initial held permission grants on revoke, and refuse
 setAccount results from a stale chain/epoch. Regressions cover all three, including actual browser navigation
@@ -51,8 +52,8 @@ Fresh unchanged Aave UI at `20fdc895a9e3925960b5cd111fe09535cf224085` on an owne
 Evidence is retained locally under `artifacts/` and `examples/aave/artifacts/`, not shipped in the package.
 This does not establish arbitrary dApp support, real-wallet compatibility or production readiness.
 
-## Publication boundary
+## Release boundary
 
-GitHub main can expose the tested candidate; npm publication is a separate owner-authorized operation.
-Do not move `v0.1.1`, overwrite 0.1.1, merge exploratory spike branches wholesale, or silently upgrade consumers.
-The README distinguishes the GitHub candidate from the still-published npm 0.1.1.
+This is a new 0.3.0 release; `v0.1.1` and npm 0.1.1 remain unchanged. The README describes the 0.3.0
+installation and links to the migration notes. Do not silently upgrade existing consumers. The Aave
+DEGRADED-ACCEPTED result is not a general production-readiness claim.
