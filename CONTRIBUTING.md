@@ -38,7 +38,7 @@ These results are narrow measurements, not full Node >= 22 / Linux certification
 | `examples/local-anvil/` | Generic repository-local dApp and static-server harness. |
 | `examples/aave/` | Separate, pinned third-party UI acceptance example; see its own README. |
 | `openspec/` | Behaviour specifications and archived changes, not installation instructions. |
-| `ACCEPTANCE.md`, `IMPLEMENTATION.md` | Historical execution records; not current test counts or release guarantees. |
+| `docs/release-0.3.0.md` | Release-candidate checks and limitations; npm publication status is separate. |
 
 ## Change and verification
 
