@@ -30,6 +30,60 @@ async function setup(t, extra = {}) {
 
 const descriptor = (acct = account) => ({ invoker: origin, parentCapability: 'eth_accounts', caveats: [{ type: 'restrictReturnedAccounts', value: [acct] }] });
 
+test('release safety: revoking an initial held grant cancels it without granting permission', async (t) => {
+  const { ctx, w } = await setup(t);
+  w.setMode('hold');
+  const pending = ctx.request('eth_requestAccounts');
+  const id = await w.whenHeld();
+  await w.revoke();
+  assert.equal(code(await pending), CODES.UNAUTHORIZED);
+  assert.equal(w.authorized, false);
+  assert.equal(w.held, false);
+  assert.throws(() => w.release(id));
+});
+
+test('release safety: origin changes before dispatch refuse sends and signatures', async (t) => {
+  const { ctx, w, node } = await setup(t, { signing: { validateSignature() {} } });
+  await ctx.request('eth_requestAccounts');
+  let url = origin + '/';
+  ctx.page.frame.url = () => url;
+  for (const [method, params] of [['eth_sendTransaction', [txFor()]], ['personal_sign', ['0x1234', account]]]) {
+    url = origin + '/';
+    w.nextRequest({ method, mode: 'hold' });
+    const pending = ctx.request(method, params);
+    const id = await w.whenHeld();
+    url = 'http://127.0.0.1:9/';
+    w.release(id);
+    assert.ok((await pending).error);
+    assert.equal(node.sent(method), 0);
+  }
+  url = origin + '/';
+  node.results.personal_sign = '0x' + '11'.repeat(65); // Synthetic shape only, not cryptographic evidence.
+  const gate = deferred();
+  node.gate = { method: 'personal_sign', promise: gate.promise };
+  const signature = ctx.request('personal_sign', ['0x1234', account]);
+  while (!node.sent('personal_sign')) await tick();
+  url = 'http://127.0.0.1:9/';
+  gate.resolve();
+  assert.equal(code(await signature), CODES.UNAUTHORIZED);
+  assert.equal(w.calls.at(-1).outcome, 'signed-discarded');
+  assert.equal(w.calls.at(-1).delivered, false);
+  assert.doesNotThrow(() => JSON.stringify(w.calls), 'frame references are not evidence');
+});
+
+test('release safety: setAccount cannot cross a concurrent chain switch', async (t) => {
+  const { w, node } = await setup(t);
+  const gate = deferred();
+  node.gate = { method: 'eth_accounts', promise: gate.promise };
+  const change = w.setAccount(account).then(() => null, (e) => e);
+  await tick();
+  await w.switchChain(chain2);
+  gate.resolve();
+  assert.equal((await change).code, CODES.CHAIN_DISCONNECTED);
+  assert.equal(w.chainId, chain2);
+  assert.equal(w.account, other);
+});
+
 test('permissions: unauthorized start, control-mode grant/reject/hold, exact descriptor, revoke without disconnect', async (t) => {
   const { node, ctx, w, events } = await setup(t);
   assert.deepEqual(await ctx.request('wallet_getPermissions'), { result: [] });

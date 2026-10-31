@@ -699,6 +699,7 @@ async function installForkWallet(context, options) {
       throw record.invalidation;
     }
     if (!connected) fail(CODES.DISCONNECTED, 'wallet disconnected');
+    guardSource(record.source);
   }
 
   async function preflight(chain, account, { requireConnected = true } = {}) {
@@ -734,12 +735,13 @@ async function installForkWallet(context, options) {
    * next and `execute` runs the method-specific continuation. Failures settle the record unless already settled.
    * `sanitize` (signing) maps every error to a constant message before it is recorded or thrown.
    */
-  async function runApproval(method, fields, execute, sanitize = (error) => error) {
+  async function runApproval(source, method, fields, execute, sanitize = (error) => error) {
     if (outstanding) fail(CODES.REQUEST_PENDING, 'another approval request is outstanding');
     const record = {
       requestId: crypto.randomUUID(), method, epoch, origin, chainId: active.chainId, endpoint: active.endpoint,
       account: activeAccount(), mode: takeMode(method), outcome: 'admitted', admittedAt: new Date().toISOString(), ...fields,
     };
+    Object.defineProperty(record, 'source', { value: source, enumerable: false });
     Object.defineProperty(record, 'resolveHold', { value: null, writable: true, enumerable: false });
     Object.defineProperty(record, 'invalidation', { value: null, writable: true, enumerable: false });
     outstanding = record;
@@ -783,7 +785,7 @@ async function installForkWallet(context, options) {
     }
   }
 
-  async function sendTransaction(params) {
+  async function sendTransaction(source, params) {
     if (!authorized) fail(CODES.UNAUTHORIZED, 'eth_sendTransaction requires an authorized account (eth_requestAccounts)');
     const tx = checkTransaction(params, activeAccount(), active.chainId);
     const inputHash = crypto.createHash('sha256').update(JSON.stringify(params[0])).digest('hex');
@@ -797,7 +799,8 @@ async function installForkWallet(context, options) {
       if (code === CODES.DISCONNECTED || code === CODES.CHAIN_DISCONNECTED) fail(code, message);
       fail(CODES.UNAUTHORIZED, 'authorization changed during policy check');
     }
-    return runApproval('eth_sendTransaction', { transaction: tx, inputHash }, async (record, decision) => {
+    guardSource(source);
+    return runApproval(source, 'eth_sendTransaction', { transaction: tx, inputHash }, async (record, decision) => {
       const chain = registry.get(record.chainId);
       await preflight(chain, record.account);
       assertLive(record);
@@ -850,7 +853,7 @@ async function installForkWallet(context, options) {
    * personal_sign / eth_signTypedData_v4 for the active authorized account, forwarded to the owned node's unlocked
    * account. The record never holds the message, typed data or signature. No retry; ambiguity is 'unknown'.
    */
-  async function signRequest(method, params) {
+  async function signRequest(source, method, params) {
     try {
       if (!authorized) signFail(CODES.UNAUTHORIZED, `${method} requires an authorized account (eth_requestAccounts)`);
       const request = checkSignatureRequest(method, params, activeAccount(), active.chainId);
@@ -867,7 +870,8 @@ async function installForkWallet(context, options) {
       if (!connected) signFail(CODES.DISCONNECTED, 'wallet disconnected');
       if (!authorized) signFail(CODES.UNAUTHORIZED, 'authorization changed during policy check');
       if (epoch !== admittedEpoch) signFail(scopeCode(), 'scope changed during policy check');
-      return await runApproval(method, fields, async (record) => {
+      guardSource(source);
+      return await runApproval(source, method, fields, async (record) => {
         const chain = registry.get(record.chainId);
         await preflight(chain, record.account);
         assertLive(record);
@@ -896,7 +900,9 @@ async function installForkWallet(context, options) {
         }
         record.signatureReturned = true;
         // Synchronous recheck: a signature generated for an outdated scope is discarded, never delivered.
-        if (record.epoch !== epoch || !connected || !authorized || active.chainId !== record.chainId || !same(activeAccount(), record.account)) {
+        let sourceLive = true;
+        try { guardSource(source); } catch { sourceLive = false; }
+        if (!sourceLive || record.epoch !== epoch || !connected || !authorized || active.chainId !== record.chainId || !same(activeAccount(), record.account)) {
           const code = scopeCode();
           record.outcome = 'signed-discarded';
           record.error = { code, message: 'scope changed after signing; signature discarded' };
@@ -911,8 +917,8 @@ async function installForkWallet(context, options) {
     }
   }
 
-  async function grant(method) {
-    return runApproval(method, {}, async (record) => {
+  async function grant(source, method) {
+    return runApproval(source, method, {}, async (record) => {
       await preflight(active, record.account);
       assertLive(record);
       const changed = !authorized;
@@ -933,10 +939,10 @@ async function installForkWallet(context, options) {
   }
 
   async function revokeAuthorization() {
-    if (!authorized) return;
+    const changed = authorized;
     authorized = false;
     bumpEpoch(CODES.UNAUTHORIZED, 'account permission revoked');
-    await emit('accountsChanged', []);
+    if (changed) await emit('accountsChanged', []);
   }
 
   async function applySwitch(target, except) {
@@ -947,7 +953,7 @@ async function installForkWallet(context, options) {
     if (authorized && !same(previous, activeAccount())) await emit('accountsChanged', [activeAccount()]);
   }
 
-  async function switchRequest(params) {
+  async function switchRequest(source, params) {
     if (!Array.isArray(params) || params.length !== 1 || !isPlainObject(params[0]) || Object.keys(params[0]).length !== 1
       || typeof params[0].chainId !== 'string' || !/^0x[1-9a-fA-F][0-9a-fA-F]{0,15}$/.test(params[0].chainId)) {
       bad('wallet_switchEthereumChain expects exactly [{chainId: <canonical hex>}]');
@@ -957,7 +963,7 @@ async function installForkWallet(context, options) {
     const target = registry.get(chainId);
     if (!target) fail(CODES.UNRECOGNIZED_CHAIN, `chain ${chainId} is not registered`);
     if (target === active) return null;
-    return runApproval('wallet_switchEthereumChain', { target: chainId }, async (record) => {
+    return runApproval(source, 'wallet_switchEthereumChain', { target: chainId }, async (record) => {
       await preflight(target, accounts.get(chainId));
       assertLive(record);
       record.outcome = 'approved';
@@ -1012,11 +1018,11 @@ async function installForkWallet(context, options) {
     }
     switch (method) {
       case 'eth_accounts': noParams(method, params); return authorized ? [activeAccount()] : [];
-      case 'eth_requestAccounts': noParams(method, params); return authorized ? [activeAccount()] : grant(method);
-      case 'wallet_requestPermissions': permissionRequest(params, method); return grant(method);
-      case 'wallet_switchEthereumChain': return switchRequest(params);
-      case 'eth_sendTransaction': return sendTransaction(params);
-      case 'personal_sign': case 'eth_signTypedData_v4': return signRequest(method, params);
+      case 'eth_requestAccounts': noParams(method, params); return authorized ? [activeAccount()] : grant(source, method);
+      case 'wallet_requestPermissions': permissionRequest(params, method); return grant(source, method);
+      case 'wallet_switchEthereumChain': return switchRequest(source, params);
+      case 'eth_sendTransaction': return sendTransaction(source, params);
+      case 'personal_sign': case 'eth_signTypedData_v4': return signRequest(source, method, params);
       default: return read(method, params);
     }
   }
@@ -1092,8 +1098,11 @@ async function installForkWallet(context, options) {
     },
     async setAccount(value) {
       if (typeof value !== 'string' || !ADDRESS.test(value)) fail(CODES.INVALID_PARAMS, 'setAccount requires an address');
-      await active.beforeSend();
-      const unlocked = await active.rpc('eth_accounts');
+      const chain = active;
+      const admittedEpoch = epoch;
+      await chain.beforeSend();
+      const unlocked = await chain.rpc('eth_accounts');
+      if (chain !== active || admittedEpoch !== epoch) fail(scopeCode(), 'scope changed during setAccount');
       if (!Array.isArray(unlocked) || !unlocked.some((a) => same(a, value))) fail(CODES.INVALID_PARAMS, `${value} is not unlocked on the active owned node`);
       if (same(value, activeAccount())) return;
       accounts.set(active.chainId, value);

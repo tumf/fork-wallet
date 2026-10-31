@@ -10,16 +10,19 @@ Status: prepared and tested on macOS; **not published to npm**. npm latest remai
 - Frozen legacy provider compatibility (`enable`, `autoRefreshOnNetworkChange`).
 - Consumer quickstart, API reference, MIT license and official npm publish configuration.
 
-This candidate integrates the latest development history and the existing public main history. Public declarations and core provider source match development commit `2ec35f0`. Release changes reconcile docs,
-licensing, registry metadata, package contents and a timeout test double. The Anvil read gateway additionally fixes
-HTTP 413 delivery during in-flight uploads on Node 22, with bounded draining and an incomplete-upload regression. Existing unrelated worktrees are preserved.
+This candidate integrates the latest development history and the existing public main history. Public declarations match development commit `2ec35f0`. Release changes reconcile docs,
+licensing, registry metadata, package contents and a timeout test double. Review fixes revalidate the caller frame
+before approval/dispatch and signature delivery, cancel initial held permission grants on revoke, and refuse
+setAccount results from a stale chain/epoch. Regressions cover all three, including actual browser navigation
+away during a held send. The Anvil read gateway additionally fixes HTTP 413 delivery during in-flight uploads
+on Node 22, with bounded draining and an incomplete-upload regression. Existing unrelated worktrees are preserved.
 
 ## Executed verification (2026-10-31, mini/macOS)
 
 | Check | Result |
 | --- | --- |
-| `npm test` | 30 passed, zero failed/cancelled/skipped, on Node 22.23.1, 24.18.0 and 26.12.1 |
-| `npm run test:sdk` | 20 passed; actual Chromium, Anvil 1.8.3, ethers 6.17.0, viem 2.57.12, wagmi core 2.22.1 |
+| `npm test` | 33 passed, zero failed/cancelled/skipped, on Node 22.23.1 and 24.18.0 after review fixes |
+| `npm run test:sdk` | 20 passed on Node 22.23.1 after review fixes; actual Chromium, Anvil 1.8.3, ethers 6.17.0, viem 2.57.12, wagmi core 2.22.1 |
 | `npm run test:legacy` | 1 passed; synthetic legacy UI fixture, actual local transaction and cleanup |
 | `npm run test:pack:runtime` | PASS; CJS/ESM, both installed exports, real local transaction lifecycle; no repository-source fallback |
 | `npm run test:pack` on Node 22 | PASS; 9 allowlisted files, MIT included, zero runtime dependencies |
@@ -28,6 +31,9 @@ HTTP 413 delivery during in-flight uploads on Node 22, with bounded draining and
 | `npm run test:aave` | DEGRADED-ACCEPTED, not clean PASS; see below |
 | `npm publish --dry-run --registry=https://registry.npmjs.org/` | PASS; no publication performed |
 | `git diff --check`, relative doc links, credential-pattern scan of reachable history | No findings in these bounded checks; not a comprehensive secret/security audit |
+
+The first Node 22 SDK run failed with `EPIPE` instead of HTTP 413 for an oversized upload. Bounded draining
+fixed it; the full SDK suite then passed, with an additional incomplete-upload closure assertion.
 
 The first Aave logic run failed 2/60 because its upstream checkout was absent. No assertions were removed or
 relaxed; rerunning against the specified upstream commit passed 60/60.

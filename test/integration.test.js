@@ -279,5 +279,18 @@ test('generic dApp on vanilla Anvil: connect approval, approve, reject, hold/can
   evidence.unsupported = wallet.unsupported;
   assert.equal(sendCalls().filter((c) => c.outcome === 'submitted' || c.outcome === 'response-lost').length, 4);
   assert.deepEqual(sendCalls().map((c) => c.outcome), ['rejected', 'submitted', 'rejected', 'submitted', 'response-lost', 'cancelled', 'submitted']);
+  // Navigating the real main frame away while held must never dispatch from the old document.
+  wallet.nextRequest({ method: 'eth_sendTransaction', mode: 'hold' });
+  await page.evaluate(([from, to, value]) => {
+    void window.ethereum.request({ method: 'eth_sendTransaction', params: [{ from, to, value }] }).catch(() => {});
+  }, [account, recipient, expectedValue]);
+  const navigationId = await wallet.whenHeld();
+  await page.goto('about:blank');
+  wallet.release(navigationId);
+  for (let i = 0; i < 100 && wallet.calls.at(-1).outcome === 'admitted'; i++) await harness.sleep(10);
+  assert.equal(wallet.calls.at(-1).outcome, 'failed');
+  assert.equal(wallet.submitted.length, 4);
+  assert.equal(await nonce(), 4n);
+  step('navigation-refused', { submitted: 4, outcome: wallet.calls.at(-1).outcome });
   evidence.result = 'PASS';
 });
