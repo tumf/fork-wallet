@@ -3,6 +3,14 @@
   "version": "0.3.0",
   "description": "Test-only EIP-1193 wallet for Playwright that submits real transactions through your own loopback Anvil node",
   "license": "MIT",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tumf/fork-wallet.git"
+  },
   "type": "commonjs",
   "main": "src/index.js",
   "types": "index.d.ts",

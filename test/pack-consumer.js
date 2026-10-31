@@ -151,6 +151,8 @@ async function main() {
     const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
     assert.notEqual(manifest.private, true);
     assert.equal(manifest.license, 'MIT');
+    assert.deepEqual(manifest.publishConfig, { registry: 'https://registry.npmjs.org/', access: 'public' });
+    assert.match(manifest.repository.url, /^git\+https:\/\/github\.com\/tumf\/fork-wallet\.git$/);
     assert.match(fs.readFileSync(path.join(ROOT, 'LICENSE'), 'utf8'), /^MIT License/);
     assert.equal(manifest.dependencies, undefined, 'zero runtime dependencies');
     const lock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));

@@ -67,13 +67,13 @@ Missing tools are failures, never skips. Apart from `npm run test:aave` (its Anv
 
 ## Packaging and release boundaries
 
-This checkout remains version **0.3.0**, **private and UNLICENSED**. Documentation changes do not announce a public
-release or license change, and do not grant OSS usage rights. The consumer Quickstart describes the intended npm
-installation path; publishing the matching API and deciding the license remain separate owner decisions.
+This checkout is the **0.3.0 release candidate**, licensed under **MIT** (see [LICENSE](LICENSE)).
+The npm registry still serves 0.1.1 until the owner explicitly approves publication of 0.3.0.
+Updating GitHub `main` or producing an archive is not an npm release.
 
-`npm pack` builds a local archive from the current checkout. `package.json` deliberately remains `private: true`
-and `license: UNLICENSED`. Do not publish, change the license, or promise OSS usage rights without the owner's decision.
-The archive includes runtime source, public declarations, README, the API reference and this contributor guide.
+`npm pack` builds a local archive from the current checkout. The package is publishable, but `npm publish`
+requires a separate owner instruction. Its registry must be `https://registry.npmjs.org/`.
+The archive includes runtime source, public declarations, README, LICENSE, the API reference and this contributor guide.
 Tests, examples, execution reports and OpenSpec files are repository-only; links to those paths require a repository
 checkout. Check the manifest with `npm pack --dry-run --json`.
 
