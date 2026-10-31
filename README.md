@@ -11,7 +11,8 @@ need an automated wallet with approve / reject / hold / lost / disconnect behavi
 ## Quickstart
 
 ```sh
-npm install --save-dev fork-wallet@0.1.1
+npm install --save-dev fork-wallet@0.1.1 playwright@1.56.1
+npx playwright install chromium
 ```
 
 ```js
@@ -41,10 +42,6 @@ wallet.setMode('reject');                     // next send fails with 4001 and n
 wallet.setMode('approve');                    // next send is submitted and the hash returned
 console.log(wallet.submitted);                // real transaction hashes on your node
 ```
-
-The repository-only runnable example `test/integration.test.js` starts a vanilla Anvil (chain 31337), serves the generic dApp in
-`examples/local-anvil/dapp/` from an ephemeral loopback HTTP server and asserts receipts, balances and nonces for
-every mode. Run it with `npm run test:integration` (requires `anvil`, Playwright Chromium and `lsof`).
 
 ## API
 
@@ -155,20 +152,7 @@ Node-side exports: `createLoopbackRpc(endpoint)`, `requireLoopbackEndpoint`, `re
 - Node >= 22 (global `fetch`, `AbortSignal.timeout`, `structuredClone`). No runtime dependencies. Playwright is an
   optional peer dependency (>= 1.40); the handle is duck-typed, so any object with the same three methods works.
 
-## Tests
+## Contributing
 
-| Command | What it covers | Needs |
-| --- | --- | --- |
-| `npm test` | `test/unit.test.js`: option refusals, method/params/field allowlists, preflight and RPC-integrity refusals (chain, client, account, redirect, wrong id, HTTP error, ambiguous, non-JSON), every mode including concurrent hold, cancellation, ownership loss during a hold, repeated lifecycle, disconnect, and the page provider script in a VM sandbox. Uses a scripted HTTP double and a fake context. | Node only |
-| `npm run test:integration` | `test/integration.test.js`: real Chromium + vanilla Anvil (chain 31337) + the example dApp. Reject (no submission), approve (receipt, exact balance and gas accounting), fail-closed through the real page, hold with a refused concurrent request, cancellation, release, lost response reconciled by hash and nonce (no duplicate), disconnect events. Writes `artifacts/local-anvil/<timestamp>/evidence.json` and `final.png`. Verifies port ownership with `lsof`, runs Anvil with a scrubbed environment and stops only its own child. | `anvil`, Playwright Chromium (`PLAYWRIGHT_BROWSERS_PATH` honoured), `lsof` |
-| `npm run test:pack` | `test/pack-consumer.js`: `npm pack`, install the tarball into a throwaway consumer outside the repo, load it from CommonJS and ESM. Pass a path argument to keep the tarball. | Node, npm |
-
-Missing tools are failures, never skips.
-
-## Packaging
-
-`npm pack` produces `fork-wallet-<version>.tgz` containing `src/index.js`, `index.d.ts`, `README.md`,
-`LICENSE` and `package.json`. Version 0.1.1 is published on npm and tagged on GitHub. Consumers can pin
-the npm version and lockfile. Tests that require archive evidence should record the tarball SHA-256 and the
-installed `src/index.js` SHA-256.
-
+Development setup, repository tests and packaging are documented in
+[CONTRIBUTING.md](https://github.com/tumf/fork-wallet/blob/main/CONTRIBUTING.md).
