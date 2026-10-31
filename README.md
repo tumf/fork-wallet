@@ -1,409 +1,184 @@
-# fork-wallet
+# ForkWallet
 
-A **test-only EIP-1193 / EIP-6963 wallet** for Playwright. It injects one provider into the main frame of one
-explicitly allowed loopback page origin, asks your test script to approve every connection, chain switch and
-transaction, and submits approved transactions through **your own loopback Anvil node** using that node's unlocked
-account. Reads are forwarded only from a bounded allowlist. The dApp under test sees real transaction hashes,
-receipts, revert data and state changes on a disposable local EVM.
+**Test how your dApp handles wallet approvals, interruptions and uncertain transaction results.**
 
-It is not MetaMask, not a production wallet, holds no key and computes no signature itself. Version 0.3.0 adds
-**opt-in** `personal_sign` and `eth_signTypedData_v4` for disposable local accounts: when you install it with a
-signing policy, approved requests are signed by the owned node's unlocked account on local chains 31337/31338 only
-(see [Signing](#signing-opt-in)). It is **not** general DeFi, mainnet-fork, real-wallet, SIWE or arbitrary-dApp
-support (see [Limitations](#trust-boundaries-and-limitations)).
+ForkWallet is a test-only browser wallet for Playwright. It exposes an EIP-1193 / EIP-6963 provider to your dApp,
+while your test controls approval, rejection, pending requests, account/chain changes and disconnects.
+Approved transactions execute on your own local Anvil node, so you can check real receipts, balances and contract state
+rather than relying on a mocked success response.
+
+It tests **your dApp's reaction to wallet behaviour**, not MetaMask or any other real wallet's implementation.
+EIP-1193 is the common interface, not the distinguishing feature: the useful part is controlling failure timing and
+checking what actually reached the local chain.
+
+## What can I test?
+
+| Situation to reproduce | ForkWallet control | What your dApp test should check |
+| --- | --- | --- |
+| The user refuses connection or a transaction | `nextRequest({ method, mode: 'reject' })` | Show a useful result, leave the pending state, submit nothing. |
+| Approval remains open | `hold`, `whenHeld()`, `release(requestId, outcome)` | Keep the UI consistent and prevent conflicting requests. |
+| Permission/account/chain changes during approval | `revoke()`, `setAccount()`, `switchChain()` | Discard stale work; do not send on the old account or chain. |
+| The wallet disconnects | `disconnect()`, `reconnect()` | Recover without confusing transport availability with account permission. |
+| The node accepts a transaction, but the dApp does not receive its hash | `nextRequest({ method: 'eth_sendTransaction', mode: 'lost' })` | Reconcile chain state before retrying; avoid duplicate application actions. |
+| A page reloads or another tab acts | One wallet shared by the allowed origin's pages in a context | Restore application state without silently replaying a transaction. |
+
+These are controls, **not a complete ready-made test suite for every dApp**. You still write the UI actions,
+transaction policy and assertions for your application. ForkWallet neither retries nor deduplicates transactions.
 
 ## Quickstart
 
+- Node **>= 22**, Playwright, Anvil **1.8.3**, and `lsof` for the packaged Anvil helper.
+- A dApp served at an exact `http://127.0.0.1:<port>` origin. `localhost` is not accepted.
+- Disposable local accounts only. Do not provide a real private key, use funded accounts or point at a public RPC.
+
+Install from npm in your test project:
+
 ```sh
-npm install --save-dev ./fork-wallet-0.3.0.tgz   # local tarball; the package is private and not published
+npm install --save-dev fork-wallet playwright@1.56.1
+npx playwright install chromium
 ```
 
+This Quickstart targets the upcoming **0.3.0** npm release. The currently published **0.1.1** does not provide all APIs used below.
+
+## Runnable example: a successful send with a lost response
+
+Save this as `wallet-check.cjs` in your test project and run `node wallet-check.cjs`. It serves a minimal local page,
+connects through the injected provider, sends **one test wei**, and checks the real receipt and recipient balance.
+This uses a direct provider call to demonstrate the controls; replace it with your dApp's UI actions in your own test.
+Anvil must already be installed on `PATH`. Run from a shell without credential-related environment variables.
+
 ```js
+const assert = require('node:assert/strict');
+const http = require('node:http');
+const { randomBytes } = require('node:crypto');
+const { setTimeout: sleep } = require('node:timers/promises');
 const { chromium } = require('playwright');
-const { installForkWallet } = require('fork-wallet');
+const { installForkWallet, createLoopbackRpc } = require('fork-wallet');
 const { startAnvil } = require('fork-wallet/anvil');
 
-const node = await startAnvil({ chainId: 31337 });   // owned vanilla Anvil 1.8.3 child + read gateway
-node.configureOrigin('http://127.0.0.1:3000');        // the only origin allowed to use node.publicEndpoint
-// Serve your dApp on http://127.0.0.1:3000 and give it node.publicEndpoint as its public read RPC URL.
-const browser = await chromium.launch();
-const context = await browser.newContext({ serviceWorkers: 'block' });
-const wallet = await installForkWallet(context, {
-  endpoint: node.endpoint,          // private management URL: never give it to the page
-  origin: 'http://127.0.0.1:3000',
-  chainId: node.chainId,
-  account: node.account,
-  beforeSend: node.beforeSend,      // ownership guard (owned child alive and sole listener)
-  validateTransaction(tx) {         // mandatory content policy
-    if (tx.to !== EXPECTED_TO) throw new Error('unexpected transaction');
-  },
-});
-const page = await context.newPage();
-await page.goto('http://127.0.0.1:3000/');
-// The dApp connects (eth_requestAccounts / wallet_requestPermissions) and sends; each is an approval request.
-wallet.setMode('approve');          // default decision; or nextRequest({method, mode}) for one request
-console.log(wallet.calls, wallet.submitted);
-await browser.close();
-await node.stop();                  // stops only the child this helper started
+async function main() {
+  let node, server, browser;
+  try {
+    node = await startAnvil({ chainId: 31337 }); // random disposable accounts; no network fork
+    const rpc = createLoopbackRpc(node.endpoint);
+    const recipient = '0x' + randomBytes(20).toString('hex');
+    server = http.createServer((req, res) => {
+      res.writeHead(200, {
+        'Content-Type': 'text/html',
+        'Content-Security-Policy': "default-src 'none'; connect-src 'none'",
+      });
+      res.end('<!doctype html><title>Wallet test</title>');
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    node.configureOrigin(origin);
+    browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: 'block' });
+    await context.routeWebSocket('**/*', (socket) => socket.close());
+    await context.route('**/*', (route) =>
+      new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+    const wallet = await installForkWallet(context, {
+      endpoint: node.endpoint, origin, chainId: node.chainId, account: node.account,
+      beforeSend: node.beforeSend,
+      validateTransaction(tx) {
+        assert.deepEqual(tx, { from: node.account, to: recipient, value: '0x1', data: '0x' });
+      },
+    });
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.evaluate(() => window.ethereum.request({ method: 'eth_requestAccounts' }));
+    wallet.nextRequest({ method: 'eth_sendTransaction', mode: 'lost' });
+    const code = await page.evaluate(async ({ from, to }) => {
+      try {
+        await window.ethereum.request({
+          method: 'eth_sendTransaction', params: [{ from, to, value: '0x1', data: '0x' }],
+        });
+        return null;
+      } catch (error) { return error.code; }
+    }, { from: node.account, to: recipient });
+    assert.equal(code, -32603); // the page saw an error, not a transaction hash
+    assert.equal(wallet.submitted.length, 1);
+    let receipt;
+    for (let i = 0; i < 50; i++) {
+      receipt = await rpc('eth_getTransactionReceipt', [wallet.submitted[0]]);
+      if (receipt) break;
+      await sleep(100);
+    }
+    assert.equal(receipt?.status, '0x1'); // nevertheless, the local chain executed it
+    assert.equal(await rpc('eth_getBalance', [recipient, 'latest']), '0x1');
+    assert.equal(await rpc('eth_getTransactionCount', [node.account, 'latest']), '0x1');
+    console.log('PASS: response lost, one real local transaction confirmed');
+  } finally {
+    try { if (browser) await browser.close(); }
+    finally {
+      try {
+        if (server?.listening) await new Promise((resolve) => {
+          server.closeAllConnections(); server.close(resolve);
+        });
+      } finally { if (node) await node.stop(); }
+    }
+  }
+}
+main().catch((error) => { console.error(error); process.exitCode = 1; });
 ```
 
-## API: `fork-wallet`
+The test runner knows the hash from `wallet.submitted`; the dApp does not. **Do not give the test-only handle to your
+application or treat it as a production recovery mechanism.** Your dApp needs its own reconciliation strategy.
 
-`installForkWallet(context, options) → Promise<ForkWallet>`. `context` is a Playwright `BrowserContext` (only
-`exposeBinding`, `addInitScript` and `pages` are used). Install once per context.
+For a real app, configure its public read RPC as `node.publicEndpoint`, never `node.endpoint`. The former is a
+restricted read gateway; the latter is the private, unauthenticated management RPC. Adapt browser routing/CSP to allow
+only your owned app and read gateway. These restrictions are not an OS sandbox.
 
-| Option | Required | Meaning |
-| --- | --- | --- |
-| `endpoint` | yes | `http://127.0.0.1:<port>` management endpoint of your node. Anything else is refused. |
-| `origin` | yes | Exact `http://127.0.0.1:<port>` origin. Only that origin's **main frame** gets `window.ethereum` and may call the binding; subframes (even same-origin) and other origins get 4200. |
-| `chainId` | yes | Positive integer or canonical hex. The node must report it. No default. |
-| `account` | yes | Account unlocked on that node. |
-| `validateTransaction(tx)` | yes | Called with the frozen normalized transaction before admission and again right before dispatch (after preflight). Throw to refuse (-32603). |
-| `beforeSend()` | yes | Ownership guard. Called before every forwarded read and twice per preflight. Throw when the node is no longer yours (4901). |
-| `chains` | no | Additional pre-registered chains `[{endpoint, chainId, account, beforeSend}]`, unique chain IDs, not repeating the initial chain. No other chain can ever be added. |
-| `clientVersion` | no | RegExp for `web3_clientVersion`. Default `/^anvil\//i`. |
-| `timeoutMs` | no | Per-RPC timeout 1–15000. Default 15000. |
-| `signing` | no | Exactly `{validateSignature(request)}`. Absent (default): `personal_sign` and `eth_signTypedData_v4` are 4200. Present: every configured chain must be 31337 or 31338, otherwise install fails -32602. `validateTransaction` never implies a signing policy. See [Signing](#signing-opt-in). |
+## Controlling a pending request
 
-### Page methods
-
-| Method | Behaviour |
-| --- | --- |
-| `eth_accounts` | `[]` until authorized, then `[activeAccount]`. Never the node's account list. |
-| `eth_requestAccounts` | If unauthorized: approval request; on approve grants permission and emits `accountsChanged([account])` once. If already authorized: returns immediately. |
-| `wallet_requestPermissions` | Params exactly `[{eth_accounts: {}}]`. Always an approval request. Returns `[descriptor]`. |
-| `wallet_getPermissions` | `[]` or exactly `[{invoker: origin, parentCapability: 'eth_accounts', caveats: [{type: 'restrictReturnedAccounts', value: [account]}]}]`. |
-| `wallet_revokePermissions` | Params exactly `[{eth_accounts: {}}]`. Returns `null`, clears permission, invalidates pending requests, emits `accountsChanged([])`. Not a disconnect. |
-| `wallet_switchEthereumChain` | Params exactly `[{chainId}]`. Requires authorization (4100). Unregistered target 4902. Same chain: `null` without approval. Otherwise approval, then target preflight, then switch: `chainChanged(chainId)` and, when the account differs, `accountsChanged([account])`. |
-| `eth_sendTransaction` | Requires authorization (4100). See [Transactions](#transactions). |
-| `personal_sign`, `eth_signTypedData_v4` | 4200 unless installed with `signing` (recorded with reason `signing-disabled`). With a policy: requires authorization (4100) and is an approval request. See [Signing](#signing-opt-in). |
-| Reads | `eth_chainId` (answered locally), `net_version`, `eth_blockNumber`, `eth_getBalance`, `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionCount`, `eth_call`, `eth_estimateGas`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_feeHistory`, `eth_getBlockByNumber`, `eth_getBlockByHash`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getLogs`. Available without account permission. Forwarded to the active node after the ownership guard and per-method validation. |
-| Everything else | 4200 and recorded in `wallet.unsupported`: `eth_sign`, `eth_signTypedData` / `_v1` / `_v3`, `eth_signTransaction`, `wallet_sendTransaction`, `wallet_sendCalls`, `wallet_addEthereumChain`, `eth_sendRawTransaction`, `eth_subscribe`, filters, `anvil_*`, `evm_*`, `debug_*`, `admin_*`, … There is no passthrough. |
-
-Request shape: an object with only `method` (string) and optional `params` (array), at most 1 MiB serialized
-(otherwise -32600). Zero-argument methods accept omitted params or `[]` only.
-
-### Read validation
-
-Every read has an exact parameter count and field allowlist. Validators build fresh values; untrusted objects are
-never forwarded as received. Addresses are 20 bytes, hashes 32 bytes, storage slots a canonical quantity or 32-byte
-word, quantities canonical hex (no leading zeros), bytes even-length hex, block references
-`latest/earliest/pending/safe/finalized` or a quantity (no EIP-1898 objects).
-
-- `eth_call` / `eth_estimateGas`: `[call]` or `[call, block]`; call fields `from` (caller-chosen, never the wallet
-  account implicitly), `to`, `data`, `value`, `gas`, fee fields, `type`, `nonce`, `chainId`, `accessList`. **No state
-  override parameter.**
-- `eth_getLogs`: `blockHash` exclusively, or a `fromBlock`/`toBlock` range of at most 10 000 blocks; tags are
-  resolved to explicit heights before forwarding. `address` one or up to 20; `topics` at most 4 positions with up to
-  20 alternatives each.
-- `eth_feeHistory`: 1–1024 blocks, at most 100 finite ascending percentiles in [0, 100].
-- Responses are bounded to 16 MiB (Content-Length and streamed body), upstream error `data` is kept only if it
-  serializes within 64 KiB. Upstream `code`/`message`/`data` (for example ABI revert data, code 3) are preserved to the
-  page `Error`.
-
-### Transactions
-
-One object. `from` is required and must be the active account (case-insensitive). `to` is optional only for a
-deployment with non-empty `data`. Optional: `value`, `data`, `chainId` (must equal the active chain), `gas`,
-`gasPrice`, `maxFeePerGas`, `maxPriorityFeePerGas`, `nonce`, `type` (`0x0`, `0x1`, `0x2`), `accessList`
-(`[{address, storageKeys}]`, at most 1024 entries+keys). Refused with -32602: unknown fields and aliases (`gasLimit`,
-`input`), numbers or non-canonical hex, `gasPrice` mixed with EIP-1559 fields, fee fields contradicting `type`,
-`accessList` on type `0x0`, `maxPriorityFeePerGas > maxFeePerGas`. Values are never rewritten: no automatic nonce,
-fee or gas changes. The node fills what you omit.
-
-Flow: shape → authorization → `validateTransaction` → **admission** (`calls` entry with `requestId`, epoch, origin,
-account, chain and endpoint binding, `inputHash` = sha256 of the exact JSON the page sent) → decision (mode / held
-release) → preflight (`beforeSend`, `eth_chainId`, `web3_clientVersion`, `eth_accounts`, `beforeSend`) →
-`validateTransaction` → synchronous stale check and `dispatching` transition → one `eth_sendTransaction` on the bound
-node → hash check → enrichment by `eth_getTransactionByHash` (`sender`, `nonce`, `type`).
-
-### Signing (opt-in)
+After connecting, queue a decision **before** the UI action starts the request:
 
 ```js
-const wallet = await installForkWallet(context, {
-  endpoint: node.endpoint, origin, chainId: 31337, account: node.account, beforeSend: node.beforeSend,
-  validateTransaction() {},
-  signing: {
-    // Mandatory. Called with a deep-frozen SignatureRequest before admission and again right before dispatch.
-    validateSignature(request) {
-      if (request.method === 'eth_signTypedData_v4' && request.typedData.primaryType !== 'TestNote') throw new Error('refused');
-    },
-  },
-});
+wallet.nextRequest({ method: 'eth_sendTransaction', mode: 'hold' });
+// Start the dApp action without waiting for its transaction request to finish.
+// Bound your test: admission may fail, in which case whenHeld() will not resolve.
+const requestId = await wallet.whenHeld();
+wallet.release(requestId, 'reject'); // 4001; no transaction submitted
+// Alternatively disconnect/revoke/switch account or chain, then assert the dApp's recovery.
 ```
 
-Only for **disposable** accounts: the packaged `startAnvil` uses `--mnemonic-random` and accepts no key. If you
-register your own node, you are responsible for its accounts being throwaway. Signing is limited to chain IDs 31337
-and 31338; the chain ID is a scope limiter, **not** a cryptographic invalidation (a `personal_sign` signature is valid
-for that key on any chain). Mainnet-ID or fork signing would need a separate isolation design and is refused.
+`release` applies once to exactly that request ID. A wrong, already released or invalidated ID fails.
+Account changes are limited to unlocked accounts on the owned node; chain changes are limited to registrations
+supplied at installation. A write already dispatched to a node cannot be undone by cancelling or disconnecting.
 
-Exact inputs (anything else is -32602, and messages never echo your data):
+## API and compatibility
 
-- `personal_sign`: exactly `[message, address]`. `message` is even-length `0x` hex bytes, at most 65 536 bytes (empty
-  `0x` is structurally allowed and forwarded unchanged; Anvil decides). No plain UTF-8 string, no address-first alias.
-  `address` must equal the active authorized account (case-insensitive); no other unlocked or impersonated address.
-  Forwarded as `[message, activeAccount]`.
-- `eth_signTypedData_v4`: exactly `[address, typedData]`, `typedData` a JSON string or a plain object, at most 65 536
-  UTF-8 bytes (both as received and as re-serialized). JSON text is parsed exactly once with `JSON.parse` (duplicate
-  keys: last wins); the parsed value is what the policy sees and what is forwarded, as
-  `[activeAccount, JSON.stringify(typedData)]`. Only own plain objects/arrays, strings, booleans, `null` and
-  `Number.isSafeInteger` numbers; no floats, unsafe integers, `undefined`, functions, bigint, getters, sparse arrays or
-  `__proto__` / `prototype` / `constructor` keys; depth ≤ 32, ≤ 4096 values. Large integers must be decimal or hex
-  strings. Top-level keys exactly `types`, `primaryType`, `domain`, `message`. `types`: ≤ 64 types, each ≤ 64 unique
-  `{name, type}` fields (1–128 characters), must define `EIP712Domain`; `primaryType` names another defined type.
-  `domain` keys only `name`, `version` (strings), `chainId` (mandatory: safe integer, decimal string or canonical hex,
-  must equal the active chain), `verifyingContract` (20 bytes), `salt` (32 bytes), and `EIP712Domain` declares exactly
-  those keys with their standard types. `message` is an object. Type syntax and value encoding are left to Anvil:
-  invalid nested values fail there (sanitized error), never with a fake success.
+- [API reference](docs/api.md): installation options, methods, events, errors, transactions, signing,
+  lifecycle records, Anvil/read gateway, and migration from 0.1.1/0.2.0.
+- Public TypeScript declarations: [index.d.ts](index.d.ts) and [anvil.d.ts](anvil.d.ts).
 
-Order: caller frame → request shape → opt-in (4200) → params array → transport (4900) → authorization (4100) →
-input (-32602) → lost check (-32602) → `validateSignature` → **admission** → decision (mode / held release) →
-preflight → `validateSignature` → synchronous stale check and `dispatching` → one RPC on the bound node → result must
-be exactly 65 bytes of hex → synchronous recheck of epoch, connection, authorization, active chain and account →
-the actual Anvil signature is returned.
+The core provider includes bounded reads, permissions, registered-chain switching and EIP-6963 discovery.
+`personal_sign` and `eth_signTypedData_v4` are disabled unless explicitly enabled with a signing policy, and then
+only for disposable accounts on chains 31337/31338. See the API reference before enabling them.
+Approval is automatic by default (`approve`); this is a test decision, not evidence of a human approval.
 
-Signing records in `calls` contain `requestId`, `method`, `account`, `chainId`, `endpoint`, `epoch`, `mode`, times,
-`outcome`, `inputHash` (sha256 of the normalized request), `domain` (`{chainId, verifyingContract}` for typed data),
-`signatureReturned` (a well-formed signature came back from the node) and `delivered` (it was returned to the page).
-They **never** contain the message, the typed data or the signature, and `submitted` stays transaction hashes only.
-Errors on signing paths carry a fixed message and the numeric code only: no upstream message or `data` (Anvil echoes
-payload values in its errors), no text thrown by your policy (refusal is -32603 `signature refused by policy`).
+Measured SDK paths use ethers 6.17.0, viem 2.57.12 and @wagmi/core 2.22.1 with Playwright 1.56.1 Chromium and Anvil 1.8.3
+on macOS. These specific tests do not establish compatibility with every SDK version, React connector, dApp or wallet.
+There are no runtime dependencies; Playwright is an optional peer.
 
-| Signing `outcome` | Meaning |
-| --- | --- |
-| `signed` | The node signed; the page got the signature. |
-| `signed-discarded` | The node returned a signature, but the scope changed after dispatch (revoke/account 4100, chain 4901, disconnect 4900). Attribution stays with the original epoch/account/chain; the signature is dropped, not delivered. Generation cannot be undone. |
-| `unknown` | Timeout, transport or integrity failure after dispatch, or a malformed result (-32603). **A signature may have been generated**; this is never proof that none was. |
-| `failed` | Before dispatch, or the node answered with a JSON-RPC error (its numeric code is kept, its message dropped). |
-| `rejected` / `cancelled` | 4001 / invalidated before dispatch. Nothing was sent to the node. |
+## Safety boundaries and non-goals
 
-Signing has no `lost` mode: while `setMode('lost')` is active a signing request fails -32602 before the policy and
-before admission (no one-shot override is consumed), `nextRequest({method: <signing>, mode: 'lost'})` throws -32602,
-and `release(id, 'lost')` on a held signing request throws and leaves it held. There are no retries.
+- **Test-only.** No production assets, real user keys, public-chain writes or real user approvals. The package holds
+  no key; Anvil signs. `startAnvil` starts only a vanilla local chain and accepts no fork URL or key input. A custom
+  owned-fork harness has additional isolation responsibilities; the name is not a general fork-support guarantee.
+- **Not a real-wallet emulator.** Tests establish behaviour against this provider, not MetaMask, WalletConnect,
+  hardware wallets, browser extensions or mobile relays. Differences among real wallets still need separate testing.
+- **Your policy matters.** `validateTransaction` must check the exact intended destination, calldata, value and any
+  fee/nonce constraints. An empty policy accepts every structurally valid transaction. `beforeSend` checks ownership;
+  callbacks are trusted, not cryptographic proofs. The page must not access the management endpoint.
+- **No exactly-once guarantee.** `lost` means a hash was received by the runner but not delivered to the page.
+  `unknown` means execution may have occurred without a usable response. Never retry blindly. ForkWallet does not
+  implement your app's reload recovery, cross-tab coordination or duplicate-action prevention.
+- **Limited methods.** No arbitrary RPC passthrough, raw transaction submission, `wallet_addEthereumChain`,
+  `wallet_sendCalls`, `eth_sign`, SIWE server, Permit2 or ERC-2612 acceptance guarantee. Unsupported methods fail 4200.
+- **Real signatures need care.** Local chain IDs do not make signatures harmless elsewhere. Never sign with a key
+  that matters, and do not record signing payloads/signatures in logs, Playwright traces, HAR, video or screenshots.
 
-Do not record Playwright traces, HAR files, videos or screenshots of contexts that sign, and do not log page values
-that hold signatures; keep signatures in the page and return booleans (for example an in-page recovery check).
+## Contributing
 
-### Modes and approvals
-
-Approval requests are `eth_requestAccounts`, `wallet_requestPermissions`, `wallet_switchEthereumChain`,
-`eth_sendTransaction` and, when enabled, `personal_sign` / `eth_signTypedData_v4`. Exactly one may be outstanding at a time (including while dispatching); another gets -32002.
-Reads run in parallel.
-
-| Mode | Next approval request |
-| --- | --- |
-| `approve` (default) | Approved. |
-| `reject` | 4001, nothing changes, nothing is submitted. |
-| `hold` | Waits for `release(requestId, outcome)`. |
-| `lost` | Transactions only: submitted, hash recorded in `submitted`, then -32603 to the page. Connection, permission and switch requests treat a global `lost` as `approve`; signing requests fail -32602. |
-
-`nextRequest({method, mode})` queues a one-shot decision for the next request of that approval method (reads never
-consume it; `lost` is valid only for `eth_sendTransaction`). `whenHeld()` resolves with the held `requestId`.
-`release(requestId, outcome)` releases exactly that request once; a wrong ID, a second release or an already
-invalidated request fails.
-
-### Epochs, invalidation and outcomes
-
-Any scope change — `revoke()` / `wallet_revokePermissions` (4100), `setAccount()` (4100), a chain switch (4901),
-`disconnect()` (4900) — increments the epoch and cancels the outstanding request if it has not reached
-`dispatching`. A continuation that returns later from `validateTransaction` or `beforeSend` sees the stale epoch and
-stops before dispatch. A write that is already dispatching is never "cancelled": it stays attributed to its original
-chain and finishes as one of:
-
-| `outcome` | Meaning |
-| --- | --- |
-| `submitted` | Node returned a hash; the page got it. |
-| `response-lost` | Node returned a hash (recorded); the page got -32603. |
-| `unknown` | Timeout, transport or integrity failure after dispatch, or a malformed hash. **The node may have executed it.** |
-| `failed` | Before dispatch (preflight etc.), or the node answered with a JSON-RPC error (code/message/data preserved). |
-| `rejected` / `cancelled` | Decision 4001 / invalidated by a scope change. Nothing was sent. |
-| `approved` | A non-transaction approval that completed. |
-| `signed` / `signed-discarded` | Signing only; see [Signing](#signing-opt-in). |
-
-There are no internal retries and no same-calldata deduplication. Exactly-once is not claimed: reconcile with the
-node (`eth_getTransactionCount`, receipts by hash) before any retry of your own.
-
-### Handle
-
-- `calls`, `submitted`, `unsupported`, `info` (frozen EIP-6963 info), `chainId`, `account`, `chains`, `mode`,
-  `signing` (installed with a signing policy), `connected`, `authorized`, `epoch`, `held`, `heldRequestId`.
-- `setMode(mode)`, `nextRequest({method, mode})`, `whenHeld()`, `release(requestId, outcome = 'approve')`.
-- `revoke()`: clears permission, emits `accountsChanged([])`.
-- `disconnect()`: transport loss; pending request fails 4900; later requests 4900 (`eth_accounts` returns `[]`,
-  `wallet_getPermissions`/`wallet_revokePermissions` still work); emits `disconnect({code: 4900})` once. Permission is
-  kept.
-- `reconnect()`: preflights the active node, restores transport and emits `connect({chainId})` once. Never regrants
-  a revoked permission.
-- `setAccount(address)`: only an account unlocked on the active owned node.
-- `switchChain(chainId)`: Node-side switch to a registered chain after target preflight (no approval).
-
-These controls are Node-only; nothing is exposed to the page. Events reach every current page whose main frame is
-on the allowed origin; a closed page or a throwing listener cannot block the others. Permission is per wallet
-install (one origin), shared across pages and reloads; a fresh context starts unapproved; a reload replays nothing.
-
-### Page provider and EIP-6963
-
-`window.ethereum` is a frozen object with `request`, `on`, `removeListener`, `off`, `isForkWallet: true` and the two
-[legacy members](#legacy-surface-exactly-two-members) `enable` and `autoRefreshOnNetworkChange` (no `isMetaMask`). Errors carry `code`, `message` and, when present, `data`. The same object is announced with
-`eip6963:announceProvider` during initialization and on every `eip6963:requestProvider`, with frozen info
-`{uuid (UUIDv4, stable per install), name: 'Fork Wallet', rdns: 'dev.forkwallet.test', icon: <constant data: SVG>}`.
-`connect({chainId})` is emitted once per page initialization (after the announce, in a microtask once the provider
-state is known) and after `reconnect()`; never per request.
-
-#### Legacy surface (exactly two members)
-
-Older dApps (for example web3modal 1.x-era code) touch two pre-EIP-1193 members. The provider stays frozen and adds
-only these:
-
-- `autoRefreshOnNetworkChange`: an own, non-enumerable, non-configurable accessor. Reading returns `false`. Assigning
-  primitive `false` succeeds (also in strict mode) and changes nothing; any other value (`true`, `undefined`, `null`,
-  `0`, strings, objects, …) throws `TypeError` synchronously without coercing it. It calls no binding, emits no event
-  and cannot be redefined or deleted. `Object.isFrozen(window.ethereum)` stays `true`.
-- `enable()`: returns `request({method: 'eth_requestAccounts'})` and nothing else. It goes through the same
-  main-frame/exact-origin check, approval (`setMode` / `nextRequest({method: 'eth_requestAccounts', ...})` / hold /
-  release), epoch invalidation and error shaping (`code`, `message`, `data`), and is recorded in `calls` as
-  `eth_requestAccounts`. Any argument, including an explicit `undefined`, rejects -32602 before reaching Node. It works
-  when extracted (`const {enable} = window.ethereum`). It grants account access only: sending and signing keep their
-  own approvals and the signing opt-in. `request({method: 'enable'})` is still 4200; `enable` is not an RPC method.
-
-Other legacy members stay absent: no `send`, `sendAsync`, `isMetaMask`, `selectedAddress`, `chainId` or
-`networkVersion` property, and no other property can be added. Verified only with a synthetic strict-mode fixture
-(`npm run test:legacy`); this is **not** a claim that any third-party app (Uniswapper, web3modal) works end to end.
-
-### Error codes
-
-| Code | When |
-| --- | --- |
-| 4001 | Rejected decision. |
-| 4100 | Not authorized (send/switch/sign before connect), or the request was invalidated by revoke / account change. |
-| 4200 | Unsupported method, signing without a signing policy, or a caller that is not the allowed origin's main frame. |
-| 4900 | Disconnected. |
-| 4901 | Selected node unavailable: ownership guard, chain, client or account preflight failed, or invalidated by a chain switch. |
-| 4902 | `wallet_switchEthereumChain` to an unregistered chain. |
-| -32002 | Another approval is outstanding. |
-| -32600 | Malformed request object (not an object, extra keys, non-string method, > 1 MiB). |
-| -32602 | Malformed params / transaction / read / signing input, wrong signer or typed-data domain, signing in lost mode, or invalid install options. |
-| -32603 | Policy refusal, lost response, unknown outcome, RPC integrity failure. |
-| other | Upstream JSON-RPC errors from the node are passed through (e.g. 3 with revert `data`). |
-
-Other exports: `createLoopbackRpc(endpoint, {timeoutMs, maxResponseBytes})` (strict, bounded, never retries; errors
-carry `kind`: `upstream`, `transport` or `integrity`), `validateReadRequest`, `checkTransaction`,
-`checkSignatureRequest(method, params, account, chainId)`, `requireLoopbackEndpoint`, `requireOrigin`,
-`normalizeChainId`, `ForkWalletError(code, message, data?)`, `MODES`, `RELEASE_OUTCOMES`, `METHODS`, `READ_METHODS`,
-`WALLET_METHODS`, `APPROVAL_METHODS`, `SIGNING_METHODS`, `SIGNING_CHAINS`, `TRANSACTION_FIELDS`, `TRANSACTION_TYPES`,
-`STATES`, `CODES`, `LIMITS`, `PROVIDER_INFO`. `METHODS` and `APPROVAL_METHODS` are static supported-capability lists
-that include the signing methods; they say nothing about whether a given install enabled signing.
-
-## API: `fork-wallet/anvil`
-
-`startAnvil({chainId = 31337, anvil = 'anvil', timeoutMs = 10000}) → Promise<OwnedAnvil>`. No other options: no CLI
-arguments, mnemonic, key or fork URL can be passed.
-
-- Refuses credential-like environment variables (`PRIVATE_KEY`, `MNEMONIC`, `SEED_PHRASE`, `KEYSTORE`, `ETH_FROM`,
-  `ETH_PASSWORD`, `FOUNDRY_*`, `ANVIL_*`, `CAST_*`, `DEPLOYER`). The child gets only `PATH` and `HOME`.
-- Runs `anvil --host 127.0.0.1 --port <free> --chain-id <id> --mnemonic-random --silent --no-cors` with stdio ignored:
-  random disposable accounts, never the well-known default mnemonic. Only `anvil/v1.8.3` is accepted.
-- Returns only after the client version, chain ID, unlocked accounts and **exclusive listener PID** (`lsof`) are
-  verified within `timeoutMs`. Any startup failure stops the child it started.
-- Result `{endpoint, publicEndpoint, chainId, account, pid, beforeSend, configureOrigin, stop}` (frozen; no RPC
-  function). `endpoint` is the private management URL. `beforeSend()` throws unless the owned child is alive and is the
-  only listener on its port. `stop()` is idempotent: closes the gateway, sends TERM to that `ChildProcess` only, KILL
-  after 5 s if needed, waits for exit and listener release, and throws on failure. It never signals a guessed PID or
-  a foreign listener. There is no process-global exit handler.
-
-**Read gateway** (`publicEndpoint`, also `startReadGateway({endpoint, beforeSend})`): a loopback HTTP server in your
-test process. Exact path `/`, `POST` and `OPTIONS` only, `Content-Type: application/json`, request ≤ 1 MiB (413),
-response ≤ 16 MiB, JSON-RPC 2.0 objects with an `id` (string/number/null; notifications get -32600), batches of 1–20.
-Every item runs the ownership guard first, then the same read allowlist and validators as the provider; `eth_accounts`,
-writes, signing, `anvil_*`/`evm_*`/`debug_*`/`admin_*` and unknown methods get 4200 per item, including inside a batch.
-CORS is granted only to the origin set by `configureOrigin(origin)` (once; a different origin later throws); requests
-carrying any other `Origin`, or any `Origin` before configuration, get 403. Requests without an `Origin` (your Node
-test runner) are served without CORS headers.
-
-## Migration from 0.2.0
-
-0.3.0 is additive for installs without `signing`: both signing methods stay 4200 (now recorded with reason
-`signing-disabled` instead of `unsupported-method`) and every other behaviour is unchanged.
-
-| 0.2.0 | 0.3.0 |
-| --- | --- |
-| `METHODS` / `APPROVAL_METHODS` / `ApprovalMethod` without signing. | They include `personal_sign` and `eth_signTypedData_v4` (static capability). Filter `calls` by `method` if you only want transactions. |
-| `CallState` had no signing states. | Adds `signed` and `signed-discarded`; `Call` adds `domain`, `signatureReturned`, `delivered`. `inputHash` of a signing record hashes the normalized request. |
-| `UnsupportedRecord.reason`: `unsupported-method` / `caller-frame`. | Adds `signing-disabled`. |
-| No `signing` option. | `signing: {validateSignature}` enables signing on chains 31337/31338 only. |
-| `LIMITS` had no signing bounds. | Adds `signMessageBytes`, `typedDataBytes`, `typedDataDepth`, `typedDataNodes`, `typedDataTypes`, `typedDataFields`, `typedDataNameChars`. |
-
-## Migration from 0.1.1
-
-0.2.0 is a breaking release.
-
-| 0.1.1 | 0.2.0 |
-| --- | --- |
-| Connected and authorized at install; `eth_accounts` returned the account. | Starts unauthorized. The page must call `eth_requestAccounts` or `wallet_requestPermissions`, which is an approval request (approve by default). Sends and switches before that fail 4100. |
-| `release(outcome)` | `release(requestId, outcome)`; get the ID from `await whenHeld()`. |
-| `whenHeld()` resolved `undefined`. | Resolves the `requestId`. |
-| `disconnect()` emitted `accountsChanged([])` + `disconnect`. | Emits only `disconnect`; permission is kept. Use `revoke()` for `accountsChanged([])`. New `reconnect()`. |
-| `calls[i].outcome`: `pending/submitted/rejected/lost/failed`. | `outcome` is the request state (see table above); `lost` → `response-lost`; timeouts after dispatch are `unknown`, not `failed`. Records include `requestId`, `method`, `epoch`, `chainId`, `endpoint`, `account`, `inputHash`, `sender`, `nonce`, `type`. Non-transaction approvals are recorded too: filter by `method`. |
-| Only `from/to/value/data/chainId`; `gas` etc. were -32602. | Legacy, 2930 and 1559 fields, deployments, `nonce` and `accessList` are accepted with strict validation. Use `gasLimit` (still unknown) if you need a -32602 control. |
-| Four methods; `eth_call` was 4200. | Bounded read allowlist, permission methods, registered-chain switching. |
-| Preflight failures were -32603. | Preflight/ownership failures are 4901; policy refusals stay -32603. |
-| Errors had `code`/`message`. | Upstream `data` is preserved (`ForkWalletError(code, message, data)`). |
-| Example harness owned Anvil. | `fork-wallet/anvil` (`startAnvil`, read gateway) is packaged; `examples/local-anvil/harness.js` only serves files. |
-| No EIP-6963, no `connect`/`chainChanged`. | EIP-6963 announce, `connect`, `chainChanged`, `accountsChanged` on grant/switch/account change. |
-| `timeoutMs` unbounded. | 1–15000. |
-
-## Trust boundaries and limitations
-
-- **Adapter proof only.** Passing tests prove that a dApp drives an EIP-1193/EIP-6963 provider correctly and that its
-  transactions execute on your local node. They prove nothing about MetaMask, WalletConnect, hardware wallets or any
-  real user approval.
-- **Executed coverage is exact, not general.** The SDK gate runs ethers 6.17.0, viem 2.57.12 and @wagmi/core 2.22.1
-  (bundled with esbuild 0.28.2) in Playwright 1.56.1 Chromium against Anvil 1.8.3 vanilla chains 31337/31338 on the
-  host recorded in ACCEPTANCE.md. Other versions, other SDK paths, React layers, mainnet/Polygon forks, Permit2 and
-  existing third-party dApps are not claimed.
-- **Signing is opt-in, local and disposable only.** Only `personal_sign` and `eth_signTypedData_v4`, only with a
-  signing policy, only on chains 31337/31338, only by the active authorized node account. Signatures are real: a
-  local chain ID does not make a `personal_sign` signature unusable elsewhere, so never sign with a key that matters.
-  No ERC-2612/Permit2 consumption, SIWE or authentication server is exercised or claimed. `eth_sign`,
-  `eth_signTypedData` v1/v3, `eth_signTransaction`, raw submission, external key input, key export, account
-  abstraction (`wallet_sendCalls`, EIP-5792/7702), `wallet_sendTransaction` and `wallet_addEthereumChain` are honest
-  4200 responses. The read gateway never signs.
-- **`beforeSend`, `validateTransaction` and `validateSignature` are trusted harness callbacks**, not cryptographic
-  proofs (`beforeSend` is not proof that a key is fresh). The packaged
-  `beforeSend` checks the owned child and its exclusive listener with `lsof`; a hostile privileged local process is out
-  of scope. An empty validator submits any well-formed transaction on your node.
-- **Not a sandbox.** Exact-origin binding, main-frame checks, CSP and Playwright route deny lists in the tests are
-  protection against accidental network use, not OS-level isolation. Nothing stops a malicious same-origin page from
-  replacing its own JS objects. The management endpoint is unauthenticated loopback HTTP.
-- **Anvil accounts are disposable.** `startAnvil` uses `--mnemonic-random`; never fund such accounts on a real chain.
-- **Ambiguous submission.** `unknown` and transport failures are not proof of no send, and for signing not proof that
-  no signature was generated. Reconcile on the node before retrying.
-- **The Aave example is one measured lending flow, not general dApp support.** `examples/aave` proves supply of 0.5 ETH
-  and withdrawal of 0.1 WETH through the unchanged, pinned Aave interface on an owned Base fork (macOS only). The
-  UI's native-ETH withdrawal needs an unlimited approval and stays blocked. Swaps, borrowing, SIWE, permits,
-  other dApps, real keys and production use are not covered, and distribution/user integration is separate work.
-- Node >= 22. No runtime dependencies. Playwright is an optional peer (>= 1.40). `lsof` is required by
-  `fork-wallet/anvil`. macOS is the executed platform; Linux portability is not certified.
-
-## Tests
-
-| Command | What it covers | Needs |
-| --- | --- | --- |
-| `npm test` | `test/unit.test.js`, `test/provider.test.js`, `test/signing.test.js`, `test/legacy-provider.test.js`: option/request/frame refusals, transaction and read schemas, RPC integrity and bounds, preflight, modes, permissions, registered chains, epochs and late policy races, outcomes, events, page provider and EIP-6963 in a VM; the legacy `autoRefreshOnNetworkChange` / `enable()` surface on the actual serialized page script bound to the real request handler; signing opt-in, exact input bounds, handle order, approvals, pre/post-dispatch scope races and sentinel redaction (synthetic stub results, labelled as such; not cryptographic evidence). In-memory doubles only (stubbed `fetch`, fake context). | Node |
-| `npm run test:sdk` | Bounded runner (`test/run-gate.js`, 180 s total) for `test/anvil.test.js` (owned lifecycle, fake-binary failures, foreign listener, gateway rules), `test/sdk-compat.test.js` (real Chromium + bundled ethers/viem/wagmi-core on two owned chains, receipts and state, revert data, logs, lost/fallback, switch, reload/reconnect, negative routing; signing stays 4200 there), `test/signing-compat.test.js` (own policy-enabled context: ethers/viem/wagmi-core sign both methods, ethers and viem recover in-page, refusals and races with dispatch counters, read gateway refusal, redaction of the evidence file) and `test/integration.test.js` (generic dApp regression). Evidence: `artifacts/sdk/<ts>/evidence.json`, `artifacts/signing/<ts>/evidence.json`, `artifacts/local-anvil/<ts>/`. | Anvil 1.8.3, Playwright Chromium (`PLAYWRIGHT_BROWSERS_PATH` honoured), `lsof` |
-| `npm run test:integration` | Only the generic dApp regression, same bounded runner. | same |
-| `npm run test:legacy` | Same bounded runner (separate from `test:sdk`) for `test/legacy-compat.test.js`: real Chromium runs the injected provider against a synthetic strict-module legacy API fixture (`test/fixtures/legacy-api`, not a third-party app) on one owned vanilla Anvil 31337. Strict render write, refused writes, `enable()` reject then connect, read-gateway agreement, one policy-approved native transfer checked by receipt, balances and nonce, then revoke with no new submission; external HTTP/WS blocked and owned listeners verified retired. | Anvil 1.8.3, Playwright Chromium, `lsof` |
-| `npm run test:pack` | `npm pack`, install into a throwaway consumer outside the repo, load `fork-wallet` and `fork-wallet/anvil` from CJS and ESM, check that private paths are not exported, that there are no runtime dependencies and that signing is default-disabled and opt-in through the installed exports. | Node, npm |
-| `npm run test:pack:runtime` | Opt-in heavy pack gate (`node test/pack-consumer.js --runtime`): everything `test:pack` checks, then the generic dApp regression (`test/integration.test.js` through the bounded `test/run-gate.js`, 180 s) runs with `fork-wallet` and `fork-wallet/anvil` resolved only from the installed temporary consumer (`FORK_WALLET_CONSUMER_DIR`, test-only; no source fallback). PASS needs child exit 0, evidence `result: PASS`, owned children stopped, no repository `src/` module loaded and installed realpaths matching the consumer. Evidence and the archive SHA-256 stay in `artifacts/pack-runtime/<run>/` (`evidence.json`, `pack-runtime.json`, `gate.log`, `final.png`) after the consumer is deleted. Not part of `test:pack` or any hook; run it explicitly. | Node >= 22, npm, installed devDependencies (`npm ci`), Anvil 1.8.3, Playwright Chromium (`PLAYWRIGHT_BROWSERS_PATH` honoured), `lsof` |
-| `npm run test:aave:logic` | Example only (`examples/aave/selfcheck.js`): Aave acceptance policy/receipt logic, outcome and exit-status matrix, redaction/runner/pin sentinels and a real local redirect-denial control in headless Chromium (loopback only). | Node, Playwright Chromium, pinned Aave checkout (`AAVE_DIR`) |
-| `npm run test:aave` | Example only (`examples/aave/gate.js` around `examples/aave/harness.js`): unchanged pinned Aave UI supplies ETH and withdraws WETH on an owned Base fork. The harness exits 0 PASS, 4 DEGRADED, 2 FAILED or 3 BLOCKED. The gate turns 4 into exit 0 (`DEGRADED-ACCEPTED`, not a clean PASS) only after inspecting the evidence; 2/3 propagate. See [examples/aave/README.md](examples/aave/README.md). | macOS `sandbox-exec`, Anvil 1.8.3, Playwright Chromium, pinned Aave checkout, public Base read RPC |
-
-Missing tools are failures, never skips. Apart from `npm run test:aave` (its Anvil fork and one `eth_blockNumber` read
-`https://mainnet.base.org`), no test contacts anything beyond 127.0.0.1.
-
-## Packaging
-
-`npm pack` produces `fork-wallet-<version>.tgz` with `src/index.js`, `src/anvil.js`, `index.d.ts`, `anvil.d.ts`,
-`README.md` and `package.json`. The package is `private` and `UNLICENSED`: a local release candidate consumed as a
-pinned tarball, not a publication. Consumers should record the tarball SHA-256 in their evidence. Existing 0.1.1
-consumers (the P-256 Signer test suite) keep their pinned 0.1.1 tarball until they migrate explicitly.
+For development setup, tests, packaging and release boundaries, see [CONTRIBUTING.md](CONTRIBUTING.md).

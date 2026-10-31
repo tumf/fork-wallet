@@ -145,7 +145,8 @@ async function main() {
     const [packed] = JSON.parse(npm(['pack', '--json', '--pack-destination', packDir], ROOT));
     const tarball = path.join(packDir, packed.filename);
     const files = packed.files.map((f) => f.path).sort();
-    assert.deepEqual(files, ['README.md', 'anvil.d.ts', 'index.d.ts', 'package.json', 'src/anvil.js', 'src/index.js'], 'tarball contents');
+    assert.deepEqual(files, ['CONTRIBUTING.md', 'README.md', 'anvil.d.ts', 'docs/api.md', 'index.d.ts', 'package.json', 'src/anvil.js', 'src/index.js'], 'tarball contents');
+    assert.match(fs.readFileSync(path.join(ROOT, 'docs/api.md'), 'utf8'), /# ForkWallet API reference/);
     assert.equal(packed.version, '0.3.0');
     const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
     assert.equal(manifest.private, true);

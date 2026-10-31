@@ -22,7 +22,9 @@
     "src",
     "index.d.ts",
     "anvil.d.ts",
-    "README.md"
+    "README.md",
+    "docs/api.md",
+    "CONTRIBUTING.md"
   ],
   "engines": {
     "node": ">=22"
