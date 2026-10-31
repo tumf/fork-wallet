@@ -31,15 +31,19 @@ transaction policy and assertions for your application. ForkWallet neither retri
 - A dApp served at an exact `http://127.0.0.1:<port>` origin. `localhost` is not accepted.
 - Disposable local accounts only. Do not provide a real private key, use funded accounts or point at a public RPC.
 
-This README targets the **0.3.0 release candidate**, not yet published on npm. The currently published
-**0.1.1** does not provide all APIs used below. Until 0.3.0 is published, install the candidate from GitHub:
+**Choose the version before installing.** The example below needs the **0.3.0 candidate** on GitHub `main`;
+npm currently provides **0.1.1**, which does not have the `fork-wallet/anvil` export or the APIs used below.
+To try the candidate in a test project:
 
 ```sh
 npm install --save-dev github:tumf/fork-wallet#main playwright@1.56.1
 npx playwright install chromium
 ```
 
-After the 0.3.0 npm release, use `npm install --save-dev fork-wallet@0.3.0 playwright@1.56.1`.
+GitHub `main` can change; commit the resulting lockfile to pin the resolved commit. This is a GitHub install,
+**not an npm release**. If you need the published 0.1.1 API instead, use
+`npm install --save-dev fork-wallet@0.1.1` and follow that version's documentation; the example below will not run
+against it. Do not install `fork-wallet@0.3.0` from npm until that version has actually been published.
 
 ## Runnable example: a successful send with a lost response
 

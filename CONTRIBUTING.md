@@ -16,12 +16,10 @@ The Aave fork example is an explicit exception, not part of the default gates. S
 [examples/aave/README.md](examples/aave/README.md) for the separate pinned Base-fork experiment; it does not establish
 general dApp support. Examples are repository-only and are not included in the installed package.
 
-Unit fixture fix (verified 2026-10-29 on Linux/Node 22.23.4): ordinary `npm test` now produces **30 passes,
-0 failures, 0 cancellations**, without a preload or helper override. Previously the hanging fetch double only
-waited for an abort event. `AbortSignal.timeout()` does not itself keep Node alive, unlike an active real HTTP
-connection, so three timeout tests and five subsequent tests were cancelled. The double now keeps a referenced
-timer only until abort, then clears it; an already-aborted signal is rejected immediately. The existing timeout
-checks and added already-aborted assertion run in the normal suite. Runtime behavior and assertions were not relaxed.
+The timeout test double keeps Node alive until an abort, then clears its timer; an already-aborted signal is
+rejected immediately. The ordinary unit suite, including the release-safety regressions, passed **33/33** on
+Node 22.23.1 and 24.18.0 (mini/macOS, 2026-10-31). See [release checks](docs/release-0.3.0.md) for scope
+and limitations. This is not a certification of every Node >= 22 release or OS.
 
 The README example was also executed on Linux arm64 with Node 22.22.3, Playwright 1.56.1 Chromium 141.0.7390.37
 and Anvil 1.8.3: one successful local receipt, recipient balance 1 wei, sender nonce 1, while the page received an error.
